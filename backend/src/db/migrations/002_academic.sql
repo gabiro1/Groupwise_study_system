@@ -1,4 +1,4 @@
-﻿-- =============================================================================
+-- =============================================================================
 -- Lien â€” 002_academic.sql
 -- The university hierarchy, courses, topics, skills, and everything a student
 -- declares about themselves. This is the substrate the matching engine reads.

@@ -3,6 +3,7 @@ import logger from "./config/logger.js";
 import { createApp } from "./config/app.js";
 import { healthcheck, closePool } from "./config/db.js";
 import { runMigrations } from "./db/migrate.js";
+import { initRealtime } from "./lib/realtime.js";
 
 /**
  * Server bootstrap.
@@ -52,6 +53,16 @@ async function start() {
       aiProvider: env.AI_PROVIDER,
     });
   });
+
+  // Attach the Socket.IO push layer to the *same* HTTP server so one port
+  // serves both the REST API and the realtime events.
+  try {
+    initRealtime(server);
+  } catch (error) {
+    // Realtime is an enhancement: REST remains the source of truth. A failed
+    // init must not take the whole API down, but it must be loud.
+    logger.error("Failed to initialise realtime layer", { message: error.message });
+  }
 
   // Slightly above a typical 60s proxy timeout, so the proxy closes idle
   // connections first and we do not race it.

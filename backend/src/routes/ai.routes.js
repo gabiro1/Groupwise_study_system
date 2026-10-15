@@ -4,11 +4,31 @@ import { validate } from "../middleware/validate.js";
 import { requireStudent, requireAuth } from "../middleware/auth.js";
 import { aiLimiter } from "../middleware/rateLimit.js";
 import env from "../config/env.js";
+import logger from "../config/logger.js";
 import { queryRows, queryOne } from "../config/db.js";
-import { AppError, NotFoundError } from "../lib/errors.js";
+import { NotFoundError } from "../lib/errors.js";
 import { assertWorkspaceAccess } from "../services/workspace.service.js";
 import { aiStatus, parseNaturalLanguage } from "../services/ai.service.js";
-import { aiChatSchema, aiIntentSchema, z } from "../lib/schemas.js";
+import { callProvider } from "../modules/ai/orchestration.js";
+import {
+  listConversations,
+  createConversation,
+  getConversation,
+  listMessages,
+  addMessage,
+  archiveConversation,
+  deleteConversation,
+} from "../modules/ai/conversation.js";
+import {
+  aiChatSchema,
+  aiIntentSchema,
+  aiConversationSchema,
+  aiConversationParamSchema,
+  aiConversationListQuerySchema,
+  aiMessageSchema,
+  aiMessageQuerySchema,
+  z,
+} from "../lib/schemas.js";
 
 const router = Router();
 
@@ -123,7 +143,7 @@ router.post(
 
     // No evidence means no answer. Inventing one would be the single worst
     // failure mode for an academic tool.
-    if (context.chunks.length === 0 && context.recentMessages.length === 0) {
+    if (context.chunks.length === 0 && context.recentMessages.length === 0 && context.platformContext.length === 0) {
       return ok(res, {
         available: true,
         answer: null,
@@ -160,6 +180,100 @@ router.post(
 
     const summary = await summariseResource(resource);
     return created(res, { available: true, ...summary });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Conversation history
+//
+// Storage is independent of provider availability: a student can still review a
+// past thread when the assistant is temporarily unconfigured. Visibility is
+// re-derived in SQL (owner or active group member) on every read, so a leaked id
+// grants nothing.
+// ---------------------------------------------------------------------------
+
+/** GET /api/ai/conversations — threads the caller can see, newest first. */
+router.get(
+  "/conversations",
+  validate({ query: aiConversationListQuerySchema }),
+  asyncHandler(async (req, res) => {
+    const conversations = await listConversations(req.user.id, req.query.groupId ?? null);
+    return ok(res, { conversations });
+  }),
+);
+
+/** POST /api/ai/conversations — start a new thread. */
+router.post(
+  "/conversations",
+  aiLimiter,
+  validate({ body: aiConversationSchema }),
+  asyncHandler(async (req, res) => {
+    const { groupId, title, kind } = req.body;
+    const conversation = await createConversation({
+      studentId: req.user.id,
+      groupId: groupId ?? null,
+      title: title ?? null,
+      kind,
+    });
+    return created(res, { conversation });
+  }),
+);
+
+/** GET /api/ai/conversations/:conversationId — one thread, if the caller may see it. */
+router.get(
+  "/conversations/:conversationId",
+  validate({ params: aiConversationParamSchema }),
+  asyncHandler(async (req, res) => {
+    const conversation = await getConversation(req.user.id, req.params.conversationId);
+    return ok(res, { conversation });
+  }),
+);
+
+/** GET /api/ai/conversations/:conversationId/messages — keyset-paginated history. */
+router.get(
+  "/conversations/:conversationId/messages",
+  validate({ params: aiConversationParamSchema, query: aiMessageQuerySchema }),
+  asyncHandler(async (req, res) => {
+    const messages = await listMessages(req.user.id, req.params.conversationId, {
+      before: req.query.before,
+      limit: req.query.limit,
+    });
+    return ok(res, { messages });
+  }),
+);
+
+/** POST /api/ai/conversations/:conversationId/messages — append a turn. */
+router.post(
+  "/conversations/:conversationId/messages",
+  aiLimiter,
+  validate({ params: aiConversationParamSchema, body: aiMessageSchema }),
+  asyncHandler(async (req, res) => {
+    const message = await addMessage(req.user.id, req.params.conversationId, {
+      role: req.body.role,
+      content: req.body.content,
+      meta: req.body.meta ?? null,
+    });
+    return created(res, { message });
+  }),
+);
+
+/** POST /api/ai/conversations/:conversationId/archive — soft state change. */
+router.post(
+  "/conversations/:conversationId/archive",
+  validate({ params: aiConversationParamSchema }),
+  asyncHandler(async (req, res) => {
+    const conversation = await archiveConversation(req.user.id, req.params.conversationId);
+    return ok(res, { conversation });
+  }),
+);
+
+/** DELETE /api/ai/conversations/:conversationId — soft delete, kept for audit. */
+router.delete(
+  "/conversations/:conversationId",
+  validate({ params: aiConversationParamSchema }),
+  asyncHandler(async (req, res) => {
+    const conversation = await deleteConversation(req.user.id, req.params.conversationId);
+    return ok(res, { conversation });
   }),
 );
 
@@ -242,7 +356,104 @@ async function gatherContext({ userId, workspaceId, resourceIds, message }) {
     .sort((a, b) => b.score - a.score)
     .slice(0, 6);
 
-  return { resources, chunks, recentMessages: recentMessages.reverse() };
+  // A workspace-scoped question is already narrowly grounded. The global
+  // assistant (no workspaceId) instead gets a factual snapshot of the student's
+  // own platform activity, so it can answer "what groups am I in?" without the
+  // model inventing anything.
+  const platformContext = workspaceId ? [] : await buildPlatformSnapshot(userId);
+
+  return { resources, chunks, recentMessages: recentMessages.reverse(), platformContext };
+}
+
+/**
+ * Assemble a plain-text snapshot of the student's own platform facts.
+ *
+ * This is deliberately derived from the database, never from the model: groups,
+ * upcoming sessions, connected partners, courses, and the stated study goal. A
+ * query failure must not break chat, so the whole thing degrades to an empty
+ * snapshot and logs.
+ */
+async function buildPlatformSnapshot(userId) {
+  try {
+    const [groups, sessions, partners, courses, goals] = await Promise.all([
+      queryRows(
+        `SELECT g.name, c.course_code, g.member_count
+           FROM study_group_members m
+           JOIN study_groups g ON g.id = m.group_id
+           LEFT JOIN courses c ON c.id = g.course_id
+          WHERE m.student_id = $1 AND m.status = 'ACTIVE' AND m.left_at IS NULL
+          ORDER BY m.last_active_at DESC NULLS LAST
+          LIMIT 15`,
+        [userId],
+        "ai:snapshotGroups",
+      ),
+      queryRows(
+        `SELECT ss.title, ss.starts_at, ss.mode, g.name AS group_name
+           FROM study_sessions ss
+           JOIN workspaces w ON w.id = ss.workspace_id
+           JOIN study_groups g ON g.id = w.group_id
+           JOIN study_group_members m ON m.group_id = g.id
+                AND m.student_id = $1 AND m.status = 'ACTIVE' AND m.left_at IS NULL
+          WHERE ss.starts_at >= now() AND ss.status = 'SCHEDULED'
+          ORDER BY ss.starts_at ASC
+          LIMIT 5`,
+        [userId],
+        "ai:snapshotSessions",
+      ),
+      queryRows(
+        `SELECT u.first_name, u.last_name
+           FROM partner_connections pc
+           JOIN users u ON u.id = CASE WHEN pc.requester_id = $1 THEN pc.recipient_id ELSE pc.requester_id END
+          WHERE pc.status = 'ACCEPTED' AND (pc.requester_id = $1 OR pc.recipient_id = $1)
+          ORDER BY pc.responded_at DESC NULLS LAST
+          LIMIT 15`,
+        [userId],
+        "ai:snapshotPartners",
+      ),
+      queryRows(
+        `SELECT c.course_code, c.name
+           FROM student_courses sc JOIN courses c ON c.id = sc.course_id
+          WHERE sc.student_id = $1 AND sc.is_active
+          ORDER BY c.course_code
+          LIMIT 20`,
+        [userId],
+        "ai:snapshotCourses",
+      ),
+      queryRows(
+        `SELECT g.label
+           FROM student_learning_goals slg JOIN learning_goals g ON g.id = slg.goal_id
+          WHERE slg.student_id = $1
+          ORDER BY slg.priority
+          LIMIT 3`,
+        [userId],
+        "ai:snapshotGoals",
+      ),
+    ]);
+
+    const lines = [];
+    if (courses.length) {
+      lines.push(`- Courses: ${courses.map((course) => `${course.course_code} ${course.name}`).join("; ")}`);
+    }
+    if (goals.length) {
+      lines.push(`- Stated study goal: ${goals.map((goal) => goal.label).join(", ")}`);
+    }
+    if (groups.length) {
+      lines.push(`- Study groups: ${groups.map((group) => `${group.name} [${group.course_code ?? "course not set"}, ${group.member_count} members]`).join("; ")}`);
+    } else {
+      lines.push("- Study groups: none yet");
+    }
+    if (sessions.length) {
+      lines.push(`- Upcoming sessions: ${sessions.map((session) => `${session.title} (${new Date(session.starts_at).toISOString()}, ${session.group_name})`).join("; ")}`);
+    }
+    if (partners.length) {
+      lines.push(`- Connected study partners: ${partners.map((partner) => [partner.first_name, partner.last_name].filter(Boolean).join(" ")).join(", ")}`);
+    }
+
+    return lines;
+  } catch (error) {
+    logger.warn("AI platform snapshot failed", { userId, message: error.message });
+    return [];
+  }
 }
 
 const tokenise = (text) =>
@@ -291,6 +502,11 @@ async function answerFromContext(message, context) {
     );
   }
 
+  const hasPlatform = context.platformContext?.length > 0;
+  if (hasPlatform) {
+    contextBlocks.push(`The student's platform snapshot:\n${context.platformContext.join("\n")}`);
+  }
+
   const system = [
     "You answer questions about a study group's own material.",
     "",
@@ -298,14 +514,17 @@ async function answerFromContext(message, context) {
     "- Use ONLY the numbered context below. If it does not contain the answer, say so plainly.",
     "- Never use general knowledge to fill a gap. Guessing is worse than admitting ignorance here.",
     "- Cite the numbers you used, like [1], inline.",
-    "- Be concise and practical. A student is usually preparing for an exam.",
     "- If the context is off-topic, say the material does not cover it.",
+    "- Be concise and practical. A student is usually preparing for an exam.",
+    ...(hasPlatform
+      ? ["- The platform snapshot is factual data about the student's own account. You may answer from it directly without citing it."]
+      : []),
     "",
     "CONTEXT:",
     ...contextBlocks,
   ].join("\n");
 
-  const response = await callModel([
+  const { text: response, model } = await callModel([
     { role: "system", content: system },
     { role: "user", content: message },
   ]);
@@ -329,11 +548,11 @@ async function answerFromContext(message, context) {
       };
     });
 
-  // Nothing cited and no discussion context means the model ignored its
-  // instructions. Better to return nothing than to present an unsourced answer as
-  // if it came from the group's material.
+  // Nothing cited and no discussion or platform context means the model ignored
+  // its instructions. Better to return nothing than to present an unsourced
+  // answer as if it came from the group's material.
   const hasDiscussion = context.recentMessages.length > 0;
-  if (sources.length === 0 && !hasDiscussion) {
+  if (sources.length === 0 && !hasDiscussion && !hasPlatform) {
     return {
       available: true,
       answer: null,
@@ -347,7 +566,7 @@ async function answerFromContext(message, context) {
     available: true,
     answer: response,
     sources,
-    model: env.AI_CHAT_MODEL,
+    model,
     // Explicit honesty about grounding: with no citations the text is discussion
     // synthesis, not something the group wrote down.
     grounded: sources.length > 0,
@@ -364,7 +583,7 @@ async function summariseResource(resource) {
     return { summary: null, reason: "NOTHING_TO_SUMMARISE" };
   }
 
-  const summary = await callModel([
+  const { text: summary, model } = await callModel([
     {
       role: "system",
       content:
@@ -376,7 +595,7 @@ async function summariseResource(resource) {
   return {
     summary,
     resource: { id: resource.id, title: resource.title, kind: resource.kind },
-    model: env.AI_CHAT_MODEL,
+    model,
   };
 }
 
@@ -391,49 +610,21 @@ async function loadAccessibleResource(userId, resourceId) {
         OR
         (r.course_id IS NOT NULL AND EXISTS (
            SELECT 1 FROM student_courses sc WHERE sc.course_id = r.course_id AND sc.student_id = $2))
-        OR
-        (r.course_id IS NOT NULL AND EXISTS (
-           SELECT 1 FROM lecturer_courses lc WHERE lc.course_id = r.course_id AND lc.lecturer_id = $2))
       )`,
     [resourceId, userId],
     "ai:loadResource",
   );
 }
 
+/**
+ * Ask the configured provider, through the shared adapter + orchestration stack.
+ *
+ * The adapter honours `jsonMode`; grounded answers and summaries are plain text,
+ * so JSON mode is off here. Circuit breaking and provider selection live behind
+ * `callProvider`, not in this file.
+ */
 async function callModel(messages) {
-  const baseUrl = (env.AI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
-
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${env.AI_API_KEY}` },
-    body: JSON.stringify({
-      model: env.AI_CHAT_MODEL,
-      messages,
-      temperature: 0.2,
-      max_tokens: env.AI_MAX_OUTPUT_TOKENS,
-    }),
-    signal: AbortSignal.timeout(env.AI_TIMEOUT_MS),
-  });
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new AppError("The assistant is unavailable right now.", {
-      status: 502,
-      code: "AI_PROVIDER_ERROR",
-      details: body.slice(0, 200),
-    });
-  }
-
-  const payload = await response.json();
-  const content = payload?.choices?.[0]?.message?.content;
-  if (typeof content !== "string") {
-    throw new AppError("The assistant returned an unusable response.", {
-      status: 502,
-      code: "AI_BAD_RESPONSE",
-    });
-  }
-
-  return content;
+  return callProvider(messages, { jsonMode: false });
 }
 
 export default router;

@@ -33,7 +33,7 @@ const DEMO_PASSWORD = "Lien!2026";
 
 const ROLES = [
   { key: "STUDENT", label: "Student", description: "Matches, joins groups, collaborates." },
-  { key: "LECTURER", label: "Lecturer", description: "Course aggregates and activities." },
+  { key: "GROUP_LEADER", label: "Group Leader", description: "Leads one or more study groups and manages their members." },
   { key: "ADMIN", label: "Administrator", description: "Platform administration and moderation." },
 ];
 
@@ -381,14 +381,8 @@ const DEMO_USERS = [
     lastName: "Rahman",
   },
   {
-    email: "lecturer@yopmail.com",
-    role: "LECTURER",
-    firstName: "Wei",
-    lastName: "Tan",
-  },
-  {
     email: "nur@yopmail.com",
-    role: "STUDENT",
+    role: "GROUP_LEADER",
     firstName: "Nur",
     lastName: "Aisyah",
     profile: {
@@ -426,7 +420,7 @@ const DEMO_USERS = [
   },
   {
     email: "danial@yopmail.com",
-    role: "STUDENT",
+    role: "GROUP_LEADER",
     firstName: "Danial",
     lastName: "Hakim",
     profile: {
@@ -733,18 +727,6 @@ async function seedDemo() {
       );
     }
   }
-
-  // The lecturer is assigned to every seeded course so the lecturer endpoints have
-  // something to authorise against.
-  await queryRows(
-    `INSERT INTO lecturer_courses (lecturer_id, course_id, academic_year, is_primary)
-     SELECT $1, c.id, 'default', TRUE
-       FROM courses c
-     ON CONFLICT (lecturer_id, course_id, academic_year) DO NOTHING
-     RETURNING id`,
-    [ids.get("lecturer@yopmail.com")],
-    "seed:lecturerCourses",
-  );
 
   await seedDemoGroup(ids, { courses, topics, goals });
   await seedDemoSecondGroup(ids, { courses, topics, goals });

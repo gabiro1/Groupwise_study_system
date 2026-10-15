@@ -82,8 +82,8 @@ export const optionalBooleanFromQuery = booleanFromQuery.optional();
 /**
  * Who may self-register.
  *
- * Only STUDENT is open. Creating a LECTURER or ADMIN account through the public
- * signup form would be a privilege-escalation hole, so elevated roles are
+ * Only STUDENT is open. Creating a GROUP_LEADER or ADMIN account through the
+ * public signup form would be a privilege-escalation hole, so elevated roles are
  * granted exclusively by an existing admin (see the admin module).
  */
 export const publicRole = z.enum([ROLES.STUDENT]);
@@ -209,6 +209,7 @@ export const studyPreferencesSchema = z.object({
   maxGroupSize: z.coerce.number().int().min(GROUP_SIZE.MIN).max(GROUP_SIZE.MAX),
   sessionMinutes: z.coerce.number().int().min(30).max(480),
   weeklyGoalHours: z.coerce.number().int().min(0).max(60).optional(),
+  partnerPreferences: shortText.max(500).optional().nullable(),
 });
 
 export const privacySettingsSchema = z
@@ -577,6 +578,229 @@ export const messageQuerySchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Study sessions — structured collaboration
+// ---------------------------------------------------------------------------
+
+export const sessionIdParamSchema = z.object({ sessionId: uuid });
+
+export const activityItemSchema = z
+  .object({
+    kind: z.enum(["INTRO", "TEACH", "QUESTIONS", "EXERCISE", "DISCUSSION", "BREAK", "REVIEW", "WRAP_UP"]),
+    title: z.string().trim().max(160).optional(),
+    plannedMinutes: z.coerce.number().int().min(0).max(240).nullable().optional(),
+  })
+  .passthrough();
+
+const sessionScheduleFields = {
+  startsAt: z.string().datetime({ offset: true }),
+  endsAt: z.string().datetime({ offset: true }),
+  mode: z.enum(["ONLINE", "PHYSICAL"]).default("ONLINE"),
+  location: shortText.max(200).optional().nullable(),
+  meetingUrl: z.string().url().max(500).optional().nullable(),
+};
+
+export const createStudySessionSchema = z
+  .object({
+    workspaceId: uuid,
+    ...sessionScheduleFields,
+    title: z.string().trim().min(2, "Give the session a title.").max(140),
+    /** Built-in meeting room (LiveKit). Optional — works even when disabled. */
+    meetingRoom: z.string().trim().max(120).optional().nullable(),
+    format: z.enum(["GUIDED", "FLEXIBLE"]).default("FLEXIBLE"),
+    mainTopic: z.string().trim().max(200).optional().nullable(),
+    objectives: z.array(z.string().trim().max(500)).max(8).default([]),
+    preparation: z
+      .array(z.object({
+        label: z.string().trim().min(1).max(200),
+        completed: z.boolean().default(false),
+      }))
+      .max(24)
+      .default([]),
+    focusIntervalMinutes: z.coerce.number().int().min(10).max(180).default(50),
+    breakMinutes: z.coerce.number().int().min(0).max(60).default(5),
+    /** Guided sessions get a starter agenda when none is supplied. */
+    activities: z.array(activityItemSchema).max(12).optional(),
+    /** Friends-only session: pass the invited member ids. */
+    participantIds: z.array(uuid).max(30).default([]),
+    participantsClosed: z.boolean().default(false),
+    attendanceTracked: z.boolean().default(true),
+  })
+  .refine((data) => new Date(data.endsAt) > new Date(data.startsAt), {
+    message: "The end time must be after the start time.",
+    path: ["endsAt"],
+  })
+  .refine(
+    (data) => new Date(data.endsAt).getTime() - new Date(data.startsAt).getTime() <= 12 * 60 * 60 * 1000,
+    { message: "A study session cannot be longer than 12 hours.", path: ["endsAt"] },
+  )
+  .refine((data) => !(data.mode === "ONLINE" && !data.meetingUrl && !data.meetingRoom), {
+    message: "An online session needs a meeting link or a built-in meeting room.",
+    path: ["meetingUrl"],
+  });
+
+export const updateStudySessionSchema = z
+  .object({
+    title: z.string().trim().min(2).max(140).optional(),
+    startsAt: z.string().datetime({ offset: true }).optional(),
+    endsAt: z.string().datetime({ offset: true }).optional(),
+    mode: z.enum(["ONLINE", "PHYSICAL"]).optional(),
+    location: shortText.max(200).nullable().optional(),
+    meetingUrl: z.string().url().max(500).nullable().optional(),
+    mainTopic: z.string().trim().max(200).nullable().optional(),
+    objectives: z.array(z.string().trim().max(500)).max(8).optional(),
+    preparation: z
+      .array(z.object({
+        label: z.string().trim().min(1).max(200),
+        completed: z.boolean().default(false),
+      }))
+      .max(24)
+      .optional(),
+  })
+  .refine((data) => Object.keys(data).length > 0, {
+    message: "Send at least one field to change.",
+  });
+
+export const participantOpSchema = z.object({ studentId: uuid });
+
+export const rsvpUpdateSchema = z.object({ rsvp: z.enum(["GOING", "MAYBE", "NOT_GOING"]) });
+
+export const roleRotationSchema = z.object({
+  roundNumber: z.coerce.number().int().min(1).max(99).optional(),
+});
+
+export const roleAssignmentSchema = z.object({
+  roundNumber: z.coerce.number().int().min(1).max(99),
+  studentId: uuid,
+  role: z.enum(["TEACHER", "QUESTIONER", "TIMER"]),
+});
+
+export const setAgendaSchema = z.object({
+  activities: z.array(activityItemSchema).min(1).max(12),
+});
+
+export const extendActivitySchema = z.object({
+  minutes: z.coerce.number().int().min(1).max(60),
+});
+
+export const sessionMessageSchema = z
+  .object({
+    body: z.string().trim().max(4000),
+    clientId: z.string().max(64).optional(),
+  })
+  .refine((data) => data.body.length > 0, {
+    message: "Write a message.",
+    path: ["body"],
+  });
+
+export const sessionMessageQuerySchema = z.object({
+  before: z.string().datetime({ offset: true }).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
+export const sessionQuestionSchema = z.object({
+  topic: z.string().trim().max(160).optional().nullable(),
+  body: z.string().trim().min(1).max(2000),
+});
+
+export const sessionQuestionResponseSchema = z.object({
+  body: z.string().trim().min(1).max(2000),
+});
+
+export const sessionQuestionStatusSchema = z.object({
+  status: z.enum(["OPEN", "ANSWERED", "NEEDS_VERIFICATION", "RESOLVED"]),
+});
+
+export const sessionNoteSchema = z.object({
+  title: z.string().trim().min(1, "Give the note a title.").max(200),
+  body: z.string().trim().max(20_000).default(""),
+});
+
+export const sessionNoteUpdateSchema = sessionNoteSchema.extend({
+  version: z.coerce.number().int().min(1),
+});
+
+export const sessionPrepSchema = z.object({
+  status: z.enum(["NOT_STARTED", "IN_PROGRESS", "READY"]),
+});
+
+export const sessionReflectionSchema = z
+  .object({
+    learned: z.string().trim().max(2000).optional().nullable(),
+    unclear: z.string().trim().max(2000).optional().nullable(),
+    review: z.string().trim().max(2000).optional().nullable(),
+    understanding: z.coerce.number().int().min(1).max(5).optional().nullable(),
+  })
+  .refine((data) => Object.values(data).some((value) => value != null && value !== ""), {
+    message: "Reflect on something before submitting.",
+  });
+
+export const sessionListQuerySchema = z.object({
+  scope: z.enum(["all", "upcoming", "active", "past"]).default("all"),
+});
+
+// ---------------------------------------------------------------------------
+// Video meetings (group_meetings) — Jitsi-backed, provider-modular
+// ---------------------------------------------------------------------------
+
+export const meetingIdParamSchema = z.object({ meetingId: uuid });
+export const meetingGroupParamSchema = z.object({ groupId: uuid });
+
+const meetingScheduleFields = {
+  title: z.string().trim().min(2, "Give the meeting a title.").max(160),
+  description: z.string().trim().max(2000).optional().default(""),
+  scheduledStart: z.string().datetime({ offset: true }),
+  expectedDurationMinutes: z.coerce.number().int().min(5).max(480),
+  // User-supplied Google Meet link. Only meaningful when provider is
+  // GOOGLE_MEET; the service re-validates before storing (see
+  // videoProvider.service.js normalizeGoogleMeetUrl).
+  joinUrl: z.string().trim().max(300).optional(),
+};
+
+export const createMeetingSchema = z
+  .object({
+    groupId: uuid,
+    ...meetingScheduleFields,
+    provider: z.enum(["JITSI", "LIVEKIT", "GOOGLE_MEET", "NONE"]).optional(),
+  })
+  .refine((data) => !Number.isNaN(new Date(data.scheduledStart).getTime()), {
+    message: "Enter a valid meeting date and time.",
+    path: ["scheduledStart"],
+  })
+  .refine((data) => new Date(data.scheduledStart).getTime() > Date.now() - 60 * 1000, {
+    message: "The meeting must start in the future.",
+    path: ["scheduledStart"],
+  })
+  .refine((data) => data.provider !== "GOOGLE_MEET" || Boolean(data.joinUrl), {
+    message: "Paste the Google Meet link for this meeting.",
+    path: ["joinUrl"],
+  })
+  .refine((data) => data.provider === "GOOGLE_MEET" || !data.joinUrl, {
+    message: "A Google Meet link only makes sense with the Google Meet provider.",
+    path: ["joinUrl"],
+  });
+
+export const updateMeetingSchema = z
+  .object({
+    title: z.string().trim().min(2).max(160).optional(),
+    description: z.string().trim().max(2000).optional(),
+    scheduledStart: z.string().datetime({ offset: true }).optional(),
+    expectedDurationMinutes: z.coerce.number().int().min(5).max(480).optional(),
+    // Leaders may swap the Meet link before/during a scheduled meeting.
+    joinUrl: z.string().trim().max(300).optional(),
+  })
+  .refine((data) => Object.keys(data).length > 0, {
+    message: "Send at least one field to change.",
+  });
+
+export const meetingListQuerySchema = z.object({
+  groupId: uuid.optional(),
+  status: z.enum(["SCHEDULED", "LIVE", "COMPLETED", "CANCELLED"]).optional(),
+  scope: z.enum(["upcoming", "live", "past", "cancelled", "all"]).default("all"),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+// ---------------------------------------------------------------------------
 // Study partners and direct messaging
 // ---------------------------------------------------------------------------
 
@@ -692,6 +916,33 @@ export const aiIntentSchema = z.object({
   goalIds: z.array(uuid).max(10).default([]),
 });
 
+// ---------------------------------------------------------------------------
+// AI conversation history
+// ---------------------------------------------------------------------------
+
+export const aiConversationSchema = z.object({
+  groupId: uuid.optional().nullable(),
+  title: z.string().trim().min(1).max(160).optional().nullable(),
+  kind: z.enum(["STUDY", "GROUP", "SINGLE", "QUIZ"]).default("STUDY"),
+});
+
+export const aiConversationParamSchema = z.object({ conversationId: uuid });
+
+export const aiConversationListQuerySchema = z.object({
+  groupId: uuid.optional(),
+});
+
+export const aiMessageSchema = z.object({
+  role: z.enum(["USER", "ASSISTANT"]).default("USER"),
+  content: z.string().trim().min(1, "Write a message.").max(8000),
+  meta: z.unknown().optional(),
+});
+
+export const aiMessageQuerySchema = z.object({
+  before: z.string().datetime({ offset: true }).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
 // =============================================================================
 // Academic administration
 // =============================================================================
@@ -752,13 +1003,6 @@ export const skillSchema = z.object({
   courseIds: z.array(uuid).max(30).default([]),
 });
 
-export const assignLecturerSchema = z.object({
-  lecturerId: uuid,
-  courseIds: z.array(uuid).min(1, "Select at least one course.").max(12),
-  academicYear: z.string().trim().max(20).default("default"),
-  isPrimary: z.boolean().default(false),
-});
-
 export const academicActivitySchema = z.object({
   courseId: uuid,
   title: z.string().trim().min(3).max(120),
@@ -777,7 +1021,7 @@ export const academicActivitySchema = z.object({
 // =============================================================================
 
 export const adminUserQuerySchema = z.object({
-  role: z.enum(["STUDENT", "LECTURER", "ADMIN"]).optional(),
+  role: z.enum(["STUDENT", "GROUP_LEADER", "ADMIN"]).optional(),
   status: z.enum(["PENDING_VERIFICATION", "ACTIVE", "SUSPENDED", "DEACTIVATED"]).optional(),
   q: shortText.max(120).optional(),
   universityId: uuid.optional(),
@@ -788,7 +1032,7 @@ export const adminUserQuerySchema = z.object({
 
 export const changeRoleSchema = z.object({
   userId: uuid,
-  role: z.enum(["STUDENT", "LECTURER", "ADMIN"]),
+  role: z.enum(["STUDENT", "GROUP_LEADER"]),
   reason: shortText.max(300).optional().nullable(),
 });
 
@@ -813,6 +1057,89 @@ export const resolveReportSchema = z.object({
   resolution: shortText.max(1000).optional().nullable(),
   action: z.enum(["NONE", "WARN_USER", "SUSPEND_USER", "REMOVE_CONTENT", "REMOVE_GROUP"]),
 });
+
+// =============================================================================
+// Admin academic taxonomy (courses)
+//
+// The course register is the taxonomy entity the admin console manages. The
+// field bounds mirror the database constraints in 002_academic.sql exactly, so
+// a value that would fail at the storage layer is rejected here with a message
+// a form can display. `course_code` reuses the same CHECK shape the table
+// enforces; uniqueness is enforced by the unique index and surfaced as a 409.
+// =============================================================================
+
+const courseCode = z
+  .string()
+  .trim()
+  .min(2, "Enter a course code.")
+  .max(20, "Keep the course code under 20 characters.")
+  .regex(/^[A-Za-z0-9]{2,4}\s?\d{3,4}[A-Za-z]?$/, "Use a code like SCS2103 or SCS 2103.");
+
+export const createCourseSchema = z.object({
+  courseCode,
+  name: z.string().trim().min(2, "Enter a course name.").max(160),
+  departmentId: uuid.optional().nullable(),
+  description: z.string().trim().max(2000).optional().default(""),
+  creditHours: z.coerce.number().int().min(1).max(12).optional().nullable(),
+  level: z.coerce.number().int().min(100).max(900).optional().nullable(),
+});
+
+export const updateCourseSchema = createCourseSchema.partial().extend({
+  // Archiving is a soft toggle backed by the existing courses.is_active column;
+  // it never deletes the row, so enrolments and groups stay intact.
+  isActive: z.boolean().optional(),
+});
+
+export const courseIdParamSchema = z.object({ courseId: uuid });
+
+// =============================================================================
+// Catalogue requests — students ask for courses/skills/topics they cannot find.
+// =============================================================================
+
+export const catalogueRequestSchema = z
+  .object({
+    kind: z.enum(["COURSE", "SKILL", "TOPIC"]),
+    title: shortText.min(1, "Describe what’s missing."),
+    note: z.string().trim().max(600).optional().nullable(),
+    courseId: uuid.optional().nullable(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.kind === "TOPIC" && !value.courseId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["courseId"], message: "Choose the course this topic belongs to." });
+    }
+  });
+
+export const adminCatalogueRequestQuerySchema = z.object({
+  status: z.enum(["PENDING", "APPROVED", "DECLINED"]).optional(),
+});
+
+export const approveCatalogueRequestSchema = z.object({
+  adminNote: z.string().trim().max(600).optional().nullable(),
+  skill: z.object({
+    name: z.string().trim().min(1).max(160).optional(),
+    category: z.string().trim().max(60).optional().default("GENERAL"),
+  }).optional(),
+  topic: z.object({
+    courseId: uuid,
+    name: z.string().trim().min(1).max(200).optional(),
+    description: z.string().trim().max(2000).optional().default(""),
+  }).optional(),
+  course: z.object({
+    courseCode,
+    name: z.string().trim().min(2).max(160).optional(),
+    departmentId: uuid.optional().nullable(),
+    description: z.string().trim().max(2000).optional().default(""),
+    creditHours: z.coerce.number().int().min(1).max(12).optional().nullable(),
+    level: z.coerce.number().int().min(100).max(900).optional().nullable(),
+  }).optional(),
+});
+
+export const declineCatalogueRequestSchema = z.object({
+  adminNote: z.string().trim().min(1, "Tell the student why.").max(600),
+});
+
+export const catalogueRequestIdParamSchema = z.object({ catalogueRequestId: uuid });
+
 
 export const createReportSchema = z.object({
   targetType: z.enum(["STUDENT", "GROUP", "MESSAGE", "RESOURCE"]),

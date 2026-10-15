@@ -390,6 +390,27 @@ export function activityCompatibility(student, group) {
 }
 
 /**
+ * Textual agreement between two free-text partner preferences.
+ *
+ * The free-text note is not structured enough for the weighted core; instead it
+ * acts as a soft secondary signal. A Jaccard overlap on the word sets rewards
+ * students who describe the same kind of session ("quiet mornings, exam prep")
+ * while remaining stable against rewordings. Returns null when either side is
+ * empty, so an unanswered note is *unknown*, not a mismatch.
+ */
+export function preferenceTextSimilarity(a, b) {
+  if (!a?.trim() || !b?.trim()) return null;
+  const words = (text) => new Set(text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+  const ours = words(a);
+  const theirs = words(b);
+  const union = new Set([...ours, ...theirs]);
+  if (union.size === 0) return null;
+  let overlap = 0;
+  for (const word of ours) if (theirs.has(word)) overlap += 1;
+  return overlap / union.size;
+}
+
+/**
  * Assess how much we can trust a recommendation given the input data quality.
  * A low-confidence score is shown to the user as such, and recommendations
  * below a floor are not surfaced at all.
@@ -412,6 +433,7 @@ export const featureHelpers = {
   clamp01,
   ratio,
   resolveLevel,
+  preferenceTextSimilarity,
 };
 
 export default {
@@ -427,5 +449,5 @@ export default {
   groupSizeCompatibility,
   activityCompatibility,
   dataConfidence,
-  resolveLevel,
+  preferenceTextSimilarity,
 };

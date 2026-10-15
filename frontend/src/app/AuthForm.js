@@ -114,8 +114,13 @@ export function LoginForm({ nextPath = "/dashboard" }) {
         }),
       });
       const role = result?.user?.role;
-      let destination = nextPath.startsWith("/dashboard") ? nextPath : "/dashboard";
+      // Send each role to its own home. The role comes from the server's
+      // authenticated response (never from client input), so this cannot be
+      // spoofed by editing the form.
+      let destination = "/dashboard";
       if (role === "ADMIN") destination = "/admin";
+      else if (role === "LECTURER") destination = "/dashboard/lecturer";
+      else if (role === "STUDENT" && nextPath.startsWith("/dashboard")) destination = nextPath;
       window.location.assign(new URL(destination, window.location.href));
     } catch (submitError) {
       setError(submitError.message);

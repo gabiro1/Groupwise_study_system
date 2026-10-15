@@ -73,6 +73,7 @@ function SettingsIcon({ name }) {
     profile: <><circle cx="12" cy="8" r="3.5" /><path d="M5 20c.8-3.4 3.1-5 7-5s6.2 1.6 7 5" /></>,
     study: <><path d="M3 9.5 12 5l9 4.5-9 4.5-9-4.5Z" /><path d="M6.5 11.5v4c3.2 2.5 7.8 2.5 11 0v-4M21 10v6" /></>,
     courses: <><path d="M5 4.5h13a1 1 0 0 1 1 1v14H6a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z" /><path d="M7 8h8M7 12h8M7 16h5" /></>,
+    topics: <><path d="M4 6h16M4 12h16M4 18h10" /><circle cx="19" cy="17.5" r="2.5" /></>,
     privacy: <><rect x="5" y="10" width="14" height="10" rx="2" /><path d="M8 10V7a4 4 0 1 1 8 0v3M12 14v2" /></>,
     notifications: <><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4" /></>,
   };
@@ -97,6 +98,7 @@ export default function StudentProfile({ initialProfile, onSaved, onNotice }) {
     maxGroupSize: 8,
     sessionMinutes: 60,
     weeklyGoalHours: 0,
+    partnerPreferences: "",
   });
   const [privacy, setPrivacy] = useState(() => initialProfile?.privacy || {
     discoverable: true,
@@ -200,6 +202,7 @@ export default function StudentProfile({ initialProfile, onSaved, onNotice }) {
     { id: "profile", label: "Profile", icon: "profile" },
     { id: "study", label: "Study preferences", icon: "study" },
     { id: "courses", label: "Courses & goals", icon: "courses" },
+    { id: "topics", label: "Topics & skills", icon: "topics" },
     { id: "privacy", label: "Privacy", icon: "privacy" },
     { id: "notifications", label: "Notifications", icon: "notifications" },
   ];
@@ -237,6 +240,7 @@ export default function StudentProfile({ initialProfile, onSaved, onNotice }) {
               profile: "Manage the personal details shown on your study profile.",
               study: "Choose how you like to study and what group fits you.",
               courses: "Manage the courses, goals, and availability used for matching.",
+              topics: "Rate your topic strengths and list the skills you bring or want to build.",
               privacy: "Control what other students can see and how recommendations work.",
               notifications: "Choose how Twigane keeps you up to date.",
             }[activeSettingsTab]}</p>
@@ -296,12 +300,19 @@ export default function StudentProfile({ initialProfile, onSaved, onNotice }) {
                 <label>Maximum group size<input type="number" min="2" max="12" value={preferences.maxGroupSize} onChange={(event) => setPreferences({ ...preferences, maxGroupSize: event.target.value })} /></label>
                 <label>Usual session length (minutes)<input type="number" min="30" max="480" step="15" value={preferences.sessionMinutes} onChange={(event) => setPreferences({ ...preferences, sessionMinutes: event.target.value })} /></label>
                 <label>Weekly study goal (hours)<input type="number" min="0" max="60" value={preferences.weeklyGoalHours} onChange={(event) => setPreferences({ ...preferences, weeklyGoalHours: event.target.value })} /></label>
+                <label className="form-span">What I’m looking for in a study partner<textarea rows={3} maxLength={500} value={preferences.partnerPreferences || ""} onChange={(event) => setPreferences({ ...preferences, partnerPreferences: event.target.value })} placeholder="e.g. Someone who can explain statistics, prefers quiet morning sessions, and is focused on exam prep." /></label>
               </div>
               <button className="button button-primary" type="submit" disabled={busy}>Save study preferences</button>
             </form>
           )}
           <div hidden={activeSettingsTab !== "courses"}>
             <ProfileLearningSettings initialProfile={profile} onSaved={(next) => {
+              setProfile(next);
+              onSaved?.(next);
+            }} onNotice={onNotice} />
+          </div>
+          <div hidden={activeSettingsTab !== "topics"}>
+            <ProfileTopicsAndSkills initialProfile={profile} onSaved={(next) => {
               setProfile(next);
               onSaved?.(next);
             }} onNotice={onNotice} />
@@ -538,6 +549,318 @@ function ProfileLearningSettings({ initialProfile, onSaved, onNotice }) {
           <button className="button button-primary" disabled={saving}>Save availability</button>
         </div>
       </form>
+    </>
+  );
+}
+
+const TOPIC_STATUS_OPTIONS = [
+  ["NEEDS_HELP", "I need help"],
+  ["LEARNING", "Still learning"],
+  ["COMFORTABLE", "Comfortable"],
+  ["STRONG", "I can teach this"],
+];
+
+const PROFICIENCY_OPTIONS = [
+  ["BEGINNER", "Beginner"],
+  ["INTERMEDIATE", "Intermediate"],
+  ["ADVANCED", "Advanced"],
+  ["EXPERT", "Expert"],
+];
+
+function ProfileTopicsAndSkills({ initialProfile, onSaved, onNotice }) {
+  const [courses] = useState(() => initialProfile?.courses || []);
+  const [activeCourseId, setActiveCourseId] = useState(() => initialProfile?.courses?.[0]?.id || "");
+  const [courseTopics, setCourseTopics] = useState({});
+  const [loadingTopics, setLoadingTopics] = useState(() => (initialProfile?.courses?.length || 0) > 0);
+  const [ratings, setRatings] = useState(() => Object.fromEntries(
+    (initialProfile?.topics || []).map((topic) => [topic.topicId, topic.status]),
+  ));
+  const [skills, setSkills] = useState(() => (initialProfile?.skills || []).map((skill) => ({
+    skillId: skill.skillId,
+    courseId: skill.courseId || null,
+    proficiency: skill.proficiency || "INTERMEDIATE",
+    isLearning: Boolean(skill.isLearning),
+  })));
+  const [knownSkills, setKnownSkills] = useState(() => Object.fromEntries(
+    (initialProfile?.skills || []).map((skill) => [skill.skillId, { name: skill.name, category: skill.category }]),
+  ));
+  const [skillQuery, setSkillQuery] = useState("");
+  const [skillResults, setSkillResults] = useState([]);
+  const [loadingSkills, setLoadingSkills] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [myRequests, setMyRequests] = useState([]);
+  const [loadingRequests, setLoadingRequests] = useState(true);
+  const [requestKind, setRequestKind] = useState("TOPIC");
+  const [requestTitle, setRequestTitle] = useState("");
+  const [requestCourseId, setRequestCourseId] = useState(() => initialProfile?.courses?.[0]?.id || "");
+  const [requestNote, setRequestNote] = useState("");
+  const [requesting, setRequesting] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    Promise.all(courses.map((course) => apiRequest(`academic/courses/${course.id}/topics`).then((result) => [course.id, result.topics || []])))
+      .then((entries) => {
+        if (active) setCourseTopics(Object.fromEntries(entries));
+      })
+      .catch((requestError) => {
+        if (active) setError(requestError.message);
+      })
+      .finally(() => {
+        if (active) setLoadingTopics(false);
+      });
+    return () => { active = false; };
+  }, [courses]);
+
+  useEffect(() => {
+    let active = true;
+    const query = new URLSearchParams({ limit: "20" });
+    if (skillQuery.trim()) query.set("q", skillQuery.trim());
+    const timer = window.setTimeout(() => {
+      setLoadingSkills(true);
+      apiRequest(`academic/skills?${query.toString()}`)
+        .then((result) => {
+          if (!active) return;
+          setSkillResults(result.skills || []);
+        })
+        .catch((requestError) => {
+          if (active) setError(requestError.message);
+        })
+        .finally(() => {
+          if (active) setLoadingSkills(false);
+        });
+    }, skillQuery ? 220 : 0);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [skillQuery]);
+
+  async function reloadProfile() {
+    const result = await apiRequest("students/me");
+    onSaved?.(result.profile);
+  }
+
+  async function saveTopics(event) {
+    event.preventDefault();
+    const topics = Object.entries(ratings)
+      .filter(([, status]) => Boolean(status))
+      .map(([topicId, status]) => ({ topicId, status }));
+    setSaving(true);
+    setError("");
+    try {
+      await apiRequest("students/me/topics", { method: "PUT", body: JSON.stringify({ topics }) });
+      onNotice?.("Topic strengths saved.");
+      await reloadProfile();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveSkills(event) {
+    event.preventDefault();
+    const payload = skills.map((skill) => ({
+      skillId: skill.skillId,
+      courseId: skill.courseId || undefined,
+      proficiency: skill.proficiency,
+      isLearning: skill.isLearning,
+    }));
+    setSaving(true);
+    setError("");
+    try {
+      await apiRequest("students/me/skills", { method: "PUT", body: JSON.stringify({ skills: payload }) });
+      onNotice?.("Skills saved.");
+      await reloadProfile();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function addSkill(skill) {
+    setKnownSkills((current) => ({ ...current, [skill.id]: { name: skill.name, category: skill.category } }));
+    setSkills((current) => current.some((entry) => entry.skillId === skill.id)
+      ? current
+      : [...current, { skillId: skill.id, courseId: null, proficiency: "INTERMEDIATE", isLearning: false }]);
+  }
+
+  function removeSkill(skillId) {
+    setSkills((current) => current.filter((entry) => entry.skillId !== skillId));
+  }
+
+  useEffect(() => {
+    let active = true;
+    apiRequest("students/me/catalogue-requests")
+      .then((result) => {
+        if (active) setMyRequests(result.requests || []);
+      })
+      .catch((requestError) => {
+        if (active) setError(requestError.message);
+      })
+      .finally(() => {
+        if (active) setLoadingRequests(false);
+      });
+    return () => { active = false; };
+  }, []);
+
+  async function addCatalogueRequest(event) {
+    event.preventDefault();
+    const title = requestTitle.trim();
+    if (!title) {
+      setError("Describe what you’d like added.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const body = { kind: requestKind, title };
+      if (requestKind === "TOPIC") body.courseId = requestCourseId || undefined;
+      if (requestNote.trim()) body.note = requestNote.trim();
+      const result = await apiRequest("students/me/catalogue-requests", { method: "POST", body: JSON.stringify(body) });
+      setMyRequests((current) => [result.request, ...current]);
+      setRequestTitle("");
+      setRequestNote("");
+      onNotice?.("Request submitted — an administrator will review it.");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const activeTopics = courseTopics[activeCourseId] || [];
+  const ratedCount = Object.values(ratings).filter(Boolean).length;
+
+  return (
+    <>
+      {error && <div className="feature-error" role="alert">{error}</div>}
+      <form className="panel feature-form" onSubmit={saveTopics}>
+        <h2>Topic strengths</h2>
+        <p className="feature-muted">Rate the topics in your courses. Flag the ones you need help with and the ones you can teach — matching pairs complementary gaps, so both are useful.</p>
+        {courses.length === 0
+          ? <p className="empty-state">Add courses in “Courses &amp; goals” first to rate their topics.</p>
+          : (
+            <>
+              <div className="topic-course-tabs" role="tablist" aria-label="Your courses">
+                {courses.map((course) => (
+                  <button
+                    type="button"
+                    key={course.id}
+                    role="tab"
+                    aria-selected={activeCourseId === course.id}
+                    className={`topic-course-tab ${activeCourseId === course.id ? "active" : ""}`}
+                    onClick={() => setActiveCourseId(course.id)}
+                  >
+                    {course.courseCode || course.name}
+                  </button>
+                ))}
+              </div>
+              {loadingTopics && <p className="empty-state">Loading topics…</p>}
+              {!loadingTopics && (
+                <div className="course-option-list">
+                  {activeTopics.map((topic) => (
+                    <label key={topic.id} className="topic-row">
+                      <span><strong>{topic.name}</strong>{topic.description && <small>{topic.description}</small>}</span>
+                      <select
+                        value={ratings[topic.id] || ""}
+                        onChange={(event) => setRatings((current) => ({ ...current, [topic.id]: event.target.value }))}
+                      >
+                        <option value="">Not rated</option>
+                        {TOPIC_STATUS_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                      </select>
+                    </label>
+                  ))}
+                  {activeTopics.length === 0 && <p className="empty-state">No topics are listed for this course yet.</p>}
+                </div>
+              )}
+            </>
+          )}
+        <button className="button button-primary" disabled={saving || courses.length === 0}>Save topic strengths{ratedCount ? ` (${ratedCount})` : ""}</button>
+      </form>
+      <form className="panel feature-form" onSubmit={saveSkills}>
+        <h2>Skills</h2>
+        <p className="feature-muted">List the skills you bring and the ones you’re building. These sharpen who the matcher suggests for you.</p>
+        <label className="catalogue-search">Find a skill<input value={skillQuery} onChange={(event) => setSkillQuery(event.target.value)} placeholder="Search skills by name" /></label>
+        <div className="selected-course-list">
+          <strong>Your skills ({skills.length})</strong>
+          {skills.map((skill) => (
+            <span className="skill-chip" key={`${skill.skillId}:${skill.courseId || "global"}`}>
+              <strong>{knownSkills[skill.skillId]?.name || "Skill"}</strong>
+              <select value={skill.proficiency} onChange={(event) => setSkills((current) => current.map((entry) => entry.skillId === skill.skillId ? { ...entry, proficiency: event.target.value } : entry))}>
+                {PROFICIENCY_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+              </select>
+              <label className="skill-learning"><input type="checkbox" checked={skill.isLearning} onChange={(event) => setSkills((current) => current.map((entry) => entry.skillId === skill.skillId ? { ...entry, isLearning: event.target.checked } : entry))} />Learning</label>
+              <button type="button" aria-label={`Remove ${knownSkills[skill.skillId]?.name || "skill"}`} onClick={() => removeSkill(skill.skillId)}>×</button>
+            </span>
+          ))}
+        </div>
+        {loadingSkills && <p className="empty-state">Loading skill catalogue…</p>}
+        <div className="course-option-list">
+          {skillResults.map((skill) => (
+            <label key={skill.id}>
+              <input type="checkbox" checked={skills.some((entry) => entry.skillId === skill.id)} onChange={() => (skills.some((entry) => entry.skillId === skill.id) ? removeSkill(skill.id) : addSkill(skill))} />
+              <span><strong>{skill.name}</strong>{skill.category && <small>{skill.category}</small>}</span>
+            </label>
+          ))}
+          {!loadingSkills && skillResults.length === 0 && <p className="empty-state">No skills match that search.</p>}
+        </div>
+        <button className="button button-primary" disabled={saving}>Save skills</button>
+      </form>
+      <form className="panel feature-form" onSubmit={addCatalogueRequest}>
+        <h2>Request a missing topic, skill, or course</h2>
+        <p className="feature-muted">Something you study isn’t in the catalogue yet? Ask for it — an administrator reviews requests and adds approved items so everyone can use them.</p>
+        <div className="feature-form-grid">
+          <label>What’s missing?
+            <select value={requestKind} onChange={(event) => setRequestKind(event.target.value)}>
+              <option value="TOPIC">A topic in one of my courses</option>
+              <option value="SKILL">A skill</option>
+              <option value="COURSE">A course</option>
+            </select>
+          </label>
+          <label>Name
+            <input required maxLength={200} value={requestTitle} onChange={(event) => setRequestTitle(event.target.value)} placeholder={requestKind === "COURSE" ? "e.g. Machine Learning Operations" : requestKind === "SKILL" ? "e.g. Data cleaning" : "e.g. Bayesian inference"} />
+          </label>
+          {requestKind === "TOPIC" && (
+            <label>Course it belongs to
+              <select value={requestCourseId} onChange={(event) => setRequestCourseId(event.target.value)}>
+                {courses.map((course) => <option value={course.id} key={course.id}>{course.courseCode || course.name}</option>)}
+              </select>
+            </label>
+          )}
+          <label className="form-span">Anything to help the reviewer?
+            <textarea rows={3} maxLength={600} value={requestNote} onChange={(event) => setRequestNote(event.target.value)} placeholder="e.g. Why it matters, where it fits, references…" />
+          </label>
+        </div>
+        <button className="button button-primary" disabled={saving}>Submit request</button>
+      </form>
+      <section className="panel feature-form">
+        <h2>Your requests</h2>
+        {loadingRequests ? (
+          <p className="empty-state">Loading your requests…</p>
+        ) : myRequests.length === 0 ? (
+          <p className="empty-state">No requests yet. Request a missing topic, skill, or course above.</p>
+        ) : (
+          <div className="request-history-list">
+            {myRequests.map((request) => (
+              <div className="request-history-row" key={request.id}>
+                <div>
+                  <strong>{request.title}</strong>
+                  <span className={`request-status request-status-${request.status.toLowerCase()}`}>
+                    {request.status === "APPROVED" ? "Added" : request.status === "DECLINED" ? "Declined" : "In review"}
+                  </span>
+                </div>
+                <small>
+                  {request.kind === "TOPIC" ? "Topic" : request.kind === "SKILL" ? "Skill" : "Course"}
+                  {request.adminNote && <span className="request-admin-note"> · {request.adminNote}</span>}
+                </small>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     </>
   );
 }

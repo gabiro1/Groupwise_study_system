@@ -8,7 +8,7 @@
 
 export const ROLES = Object.freeze({
   STUDENT: "STUDENT",
-  LECTURER: "LECTURER",
+  GROUP_LEADER: "GROUP_LEADER",
   ADMIN: "ADMIN",
 });
 
@@ -154,10 +154,69 @@ export const TASK_PRIORITY = Object.freeze({
 export const SESSION_MODE = Object.freeze({ ONLINE: "ONLINE", PHYSICAL: "PHYSICAL" });
 export const SESSION_STATUS = Object.freeze({
   SCHEDULED: "SCHEDULED",
+  ACTIVE: "ACTIVE",
+  PAUSED: "PAUSED",
   COMPLETED: "COMPLETED",
   CANCELLED: "CANCELLED",
 });
+export const SESSION_FORMAT = Object.freeze({ GUIDED: "GUIDED", FLEXIBLE: "FLEXIBLE" });
+export const STUDY_ROLE = Object.freeze({ TEACHER: "TEACHER", QUESTIONER: "QUESTIONER", TIMER: "TIMER" });
+export const QUESTION_STATUS = Object.freeze({
+  OPEN: "OPEN",
+  ANSWERED: "ANSWERED",
+  NEEDS_VERIFICATION: "NEEDS_VERIFICATION",
+  RESOLVED: "RESOLVED",
+});
+export const PREP_STATUS = Object.freeze({
+  NOT_STARTED: "NOT_STARTED",
+  IN_PROGRESS: "IN_PROGRESS",
+  READY: "READY",
+});
+export const SESSION_ACTIVITY_KIND = Object.freeze({
+  INTRO: "INTRO",
+  TEACH: "TEACH",
+  QUESTIONS: "QUESTIONS",
+  EXERCISE: "EXERCISE",
+  DISCUSSION: "DISCUSSION",
+  BREAK: "BREAK",
+  REVIEW: "REVIEW",
+  WRAP_UP: "WRAP_UP",
+});
 export const RSVP_STATUS = Object.freeze({ GOING: "GOING", MAYBE: "MAYBE", NOT_GOING: "NOT_GOING" });
+
+export const MEETING_STATUS = Object.freeze({
+  SCHEDULED: "SCHEDULED",
+  LIVE: "LIVE",
+  COMPLETED: "COMPLETED",
+  CANCELLED: "CANCELLED",
+});
+
+export const MEETING_PROVIDER = Object.freeze({
+  JITSI: "JITSI",
+  LIVEKIT: "LIVEKIT",
+  GOOGLE_MEET: "GOOGLE_MEET",
+  NONE: "NONE",
+});
+
+export const MEETING_ATTENDANCE_STATUS = Object.freeze({
+  JOINED: "JOINED",
+  LEFT: "LEFT",
+  IN_CALL: "IN_CALL",
+});
+
+/** Valid video-meeting state transitions (compare-and-set in the service). */
+export const MEETING_TRANSITIONS = Object.freeze({
+  SCHEDULED: ["LIVE", "CANCELLED"],
+  LIVE: ["COMPLETED", "CANCELLED"],
+  COMPLETED: [],
+  CANCELLED: [],
+});
+
+/** Duration bounds for scheduled video meetings (minutes). */
+export const MEETING_DURATION = Object.freeze({ MIN: 5, MAX: 480 });
+
+/** How early (minutes before scheduled_start) a member may join. */
+export const MEETING_JOIN_WINDOW_MINUTES = 15;
 
 export const RESOURCE_KIND = Object.freeze({
   FILE: "FILE",
@@ -194,6 +253,12 @@ export const NOTIFICATION_TYPE = Object.freeze({
   PARTNER_INVITATION: "PARTNER_INVITATION",
   PARTNER_ACCEPTED: "PARTNER_ACCEPTED",
   DIRECT_MESSAGE: "DIRECT_MESSAGE",
+  SESSION_STARTED: "SESSION_STARTED",
+  ROLE_ASSIGNED: "ROLE_ASSIGNED",
+  MEETING_SCHEDULED: "MEETING_SCHEDULED",
+  MEETING_UPDATED: "MEETING_UPDATED",
+  MEETING_CANCELLED: "MEETING_CANCELLED",
+  MEETING_STARTED: "MEETING_STARTED",
 });
 
 /**

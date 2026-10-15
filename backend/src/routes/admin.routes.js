@@ -15,10 +15,17 @@ import {
   reportQuerySchema,
   resolveReportSchema,
   createReportSchema,
-  assignLecturerSchema,
   settingsSchema,
+  createCourseSchema,
+  updateCourseSchema,
+  courseIdParamSchema,
+  adminCatalogueRequestQuerySchema,
+  approveCatalogueRequestSchema,
+  declineCatalogueRequestSchema,
+  catalogueRequestIdParamSchema,
   z,
 } from "../lib/schemas.js";
+import * as catalogue from "../services/catalogue.service.js";
 
 const router = Router();
 
@@ -209,7 +216,7 @@ router.get(
 /**
  * POST /api/admin/users/role
  *
- * Role changes are one-directional by policy: an admin may grant LECTURER or
+ * Role changes are one-directional by policy: an admin may grant GROUP_LEADER or
  * STUDENT, but never ADMIN, and never to another admin. Granting admin rights
  * should be a deliberate, out-of-band operation.
  */
@@ -241,21 +248,24 @@ router.post(
       throw new ConflictError(`That user is already a ${role.toLowerCase()}.`);
     }
 
-    // A lecturer is only a lecturer for courses they are actually assigned to.
-    // Demoting a lecturer who still has assignments would leave course rows
-    // pointing at a student.
-    if (target.role === "LECTURER" && role === "STUDENT") {
-      const assigned = await queryOne(
-        "SELECT count(*)::int AS courses FROM lecturer_courses WHERE lecturer_id = $1",
+    // A group leader is only a leader while they actually lead a group. Demoting
+    // them while memberships still say OWNER/MODERATOR would desynchronise the
+    // role from the memberships that justify it.
+    if (target.role === "GROUP_LEADER" && role === "STUDENT") {
+      const leading = await queryOne(
+        `SELECT count(*)::int AS groups
+           FROM study_group_members m JOIN study_groups g ON g.id = m.group_id
+          WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
+            AND m.role IN ('OWNER', 'MODERATOR') AND g.status = 'ACTIVE'`,
         [userId],
-        "admin:lecturerAssignments",
+        "admin:leaderGroups",
       );
 
-      if (assigned.courses > 0) {
-        throw new ConflictError(
-          "That lecturer is still assigned to courses. Reassign them before changing their role.",
-          { code: "STILL_ASSIGNED", details: { courses: assigned.courses } },
-        );
+      if (leading.groups > 0) {
+        throw new ConflictError("That user still leads active groups. Remove them as a leader first.", {
+          code: "STILL_LEADING",
+          details: { groups: leading.groups },
+        });
       }
     }
 
@@ -414,104 +424,6 @@ router.post(
     }, "admin:restore");
 
     return ok(res, { user: restored });
-  }),
-);
-
-/**
- * POST /api/admin/lecturers/assign
- *
- * Assigns a lecturer to courses. This is what makes a lecturer's access
- * meaningful: every lecturer route is scoped by this table, so an unassigned
- * lecturer sees nothing.
- */
-router.post(
-  "/lecturers/assign",
-  writeLimiter,
-  validate({ body: assignLecturerSchema }),
-  asyncHandler(async (req, res) => {
-    const { lecturerId, courseIds, academicYear, isPrimary } = req.body;
-
-    const lecturer = await queryOne(
-      `SELECT u.id, r.key AS role FROM users u JOIN roles r ON r.id = u.role_id
-        WHERE u.id = $1 AND u.deleted_at IS NULL`,
-      [lecturerId],
-      "admin:loadLecturer",
-    );
-
-    if (!lecturer) throw new NotFoundError("That user");
-
-    if (lecturer.role !== "LECTURER") {
-      throw new ConflictError("That user is not a lecturer. Change their role first.", {
-        code: "NOT_A_LECTURER",
-      });
-    }
-
-    const courses = await queryRows("SELECT id FROM courses WHERE id = ANY($1::uuid[])", [courseIds], "admin:courses");
-    if (courses.length !== courseIds.length) {
-      throw new NotFoundError("One or more of those courses");
-    }
-
-    const result = await withTransaction(async (tx) => {
-      const assigned = [];
-      const skipped = [];
-
-      for (const courseId of courseIds) {
-        const inserted = await tx.query(
-          `INSERT INTO lecturer_courses (lecturer_id, course_id, academic_year, is_primary)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (lecturer_id, course_id, academic_year) DO UPDATE SET is_primary = EXCLUDED.is_primary
-           RETURNING id, course_id, is_primary`,
-          [lecturerId, courseId, academicYear, isPrimary],
-          "admin:assignLecturer",
-        );
-
-        if (inserted.rowCount) assigned.push(inserted.rows[0]);
-        else skipped.push(courseId);
-      }
-
-      await recordAudit(
-        {
-          actor: req.user,
-          req,
-          action: "lecturer.assigned",
-          entityType: "user",
-          entityId: lecturerId,
-          metadata: { courseIds, academicYear, isPrimary },
-        },
-        { tx },
-      );
-
-      return { assigned: assigned.length, skipped: skipped.length };
-    }, "admin:assignLecturer");
-
-    return ok(res, result);
-  }),
-);
-
-/** DELETE /api/admin/lecturers/:lecturerId/courses/:courseId */
-router.delete(
-  "/lecturers/:lecturerId/courses/:courseId",
-  writeLimiter,
-  validate({ params: z.object({ lecturerId: z.string().uuid(), courseId: z.string().uuid() }) }),
-  asyncHandler(async (req, res) => {
-    const result = await query(
-      "DELETE FROM lecturer_courses WHERE lecturer_id = $1 AND course_id = $2",
-      [req.params.lecturerId, req.params.courseId],
-      "admin:unassignLecturer",
-    );
-
-    if (result.rowCount === 0) throw new NotFoundError("That assignment");
-
-    await recordAudit({
-          actor: req.user,
-          req,
-      action: "lecturer.unassigned",
-      entityType: "user",
-      entityId: req.params.lecturerId,
-      metadata: { courseId: req.params.courseId },
-    });
-
-    return ok(res, { removed: true });
   }),
 );
 
@@ -837,15 +749,22 @@ router.get(
           `SELECT
              (SELECT count(*)::int FROM users u JOIN roles r ON r.id = u.role_id
                WHERE r.key = 'STUDENT' AND u.deleted_at IS NULL)                       AS total_students,
+             (SELECT count(*)::int FROM users u JOIN roles r ON r.id = u.role_id
+               WHERE r.key = 'GROUP_LEADER' AND u.deleted_at IS NULL)                  AS total_group_leaders,
              (SELECT count(*)::int FROM users WHERE status = 'ACTIVE' AND deleted_at IS NULL)        AS active_accounts,
              (SELECT count(*)::int FROM users WHERE status = 'SUSPENDED' AND deleted_at IS NULL)     AS suspended_accounts,
              (SELECT count(*)::int FROM users WHERE status = 'DEACTIVATED' AND deleted_at IS NULL)   AS deactivated_accounts,
              (SELECT count(*)::int FROM users WHERE status = 'PENDING_VERIFICATION' AND deleted_at IS NULL) AS pending_accounts,
              (SELECT count(*)::int FROM study_groups)                                 AS total_groups,
              (SELECT count(*)::int FROM study_groups WHERE status = 'ACTIVE')         AS active_groups,
+             (SELECT count(*)::int FROM workspaces WHERE NOT is_archived)             AS total_workspaces,
              (SELECT count(*)::int FROM study_group_members
                WHERE left_at IS NULL AND status = 'ACTIVE')                           AS total_memberships,
              (SELECT count(*)::int FROM reports WHERE status IN ('OPEN', 'IN_REVIEW')) AS pending_reports,
+             (SELECT count(*)::int FROM study_sessions
+               WHERE status = 'SCHEDULED' AND starts_at >= now())                      AS upcoming_sessions,
+             (SELECT count(*)::int FROM users
+               WHERE deleted_at IS NULL AND created_at >= now() - interval '7 days')   AS recent_registrations,
              (SELECT count(*)::int FROM study_sessions
                WHERE status <> 'CANCELLED'
                  AND starts_at >= date_trunc('month', now())
@@ -944,12 +863,16 @@ router.get(
       range,
       metrics: {
         totalStudents: counts.total_students,
+        totalGroupLeaders: counts.total_group_leaders,
         activeAccounts: counts.active_accounts,
         suspendedAccounts: counts.suspended_accounts,
         totalGroups: counts.total_groups,
         activeGroups: counts.active_groups,
+        totalWorkspaces: counts.total_workspaces,
         totalMemberships: counts.total_memberships,
         pendingReports: counts.pending_reports,
+        upcomingSessions: counts.upcoming_sessions,
+        recentRegistrations: counts.recent_registrations,
         sessionsThisMonth: counts.sessions_this_month,
       },
       accountDistribution: {
@@ -1073,7 +996,175 @@ router.get(
   }),
 );
 
-/** GET /api/admin/search — global header search across users and groups. */
+// ---------------------------------------------------------------------------
+// Academic taxonomy — course CRUD
+//
+// Courses are the taxonomy entity the admin console manages. Archiving is a
+// soft toggle on the existing `courses.is_active` column: it never deletes the
+// row, so enrolments, groups and topics stay referentially intact. Every
+// mutation is audited, matching the rest of this router.
+// ---------------------------------------------------------------------------
+
+/** POST /api/admin/academic/courses — create a course. */
+router.post(
+  "/academic/courses",
+  writeLimiter,
+  validate({ body: createCourseSchema }),
+  asyncHandler(async (req, res) => {
+    const { courseCode, name, departmentId, description, creditHours, level } = req.body;
+
+    // Validate the department relationship before inserting, so a bad FK is a
+    // clean 422 rather than a raw driver error surfaced as a 400.
+    if (departmentId) {
+      const department = await queryOne("SELECT id FROM departments WHERE id = $1", [departmentId], "admin:courseDept");
+      if (!department) throw new AppError("Select a valid department.", { status: 422, code: "INVALID_DEPARTMENT" });
+    }
+
+    let course;
+    try {
+      course = await queryOne(
+        `INSERT INTO courses (course_code, name, department_id, description, credit_hours, level)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, course_code, name, level, is_active, credit_hours, department_id`,
+        [courseCode.trim(), name.trim(), departmentId ?? null, description ?? "", creditHours ?? null, level ?? null],
+        "admin:createCourse",
+      );
+    } catch (error) {
+      // The unique index on course_code raises 23505; present it as a 409 the
+      // form can show on the offending field.
+      if (error.code === "DUPLICATE") {
+        throw new ConflictError("A course with that code already exists.", { code: "DUPLICATE", fields: { courseCode: "That course code is already in use." } });
+      }
+      throw error;
+    }
+
+    await recordAudit({
+      actor: req.user,
+      req,
+      action: AUDIT.COURSE_CREATED,
+      entityType: "course",
+      entityId: course.id,
+      metadata: { courseCode: course.course_code, name: course.name },
+    });
+
+    return created(res, { course });
+  }),
+);
+
+/** PATCH /api/admin/academic/courses/:courseId — edit or archive a course. */
+router.patch(
+  "/academic/courses/:courseId",
+  writeLimiter,
+  validate({ params: courseIdParamSchema, body: updateCourseSchema }),
+  asyncHandler(async (req, res) => {
+    const { courseId } = req.params;
+    const updates = req.body;
+
+    const existing = await queryOne(
+      "SELECT id, course_code, name, is_active FROM courses WHERE id = $1",
+      [courseId],
+      "admin:loadCourse",
+    );
+    if (!existing) throw new NotFoundError("That course");
+
+    if (updates.departmentId) {
+      const department = await queryOne("SELECT id FROM departments WHERE id = $1", [updates.departmentId], "admin:courseDept");
+      if (!department) throw new AppError("Select a valid department.", { status: 422, code: "INVALID_DEPARTMENT" });
+    }
+
+    // Build the SET clause only from provided fields, so a partial edit never
+    // nulls out columns the caller did not send.
+    const columns = {
+      courseCode: "course_code",
+      name: "name",
+      departmentId: "department_id",
+      description: "description",
+      creditHours: "credit_hours",
+      level: "level",
+      isActive: "is_active",
+    };
+    const values = [];
+    const assignments = [];
+    for (const [key, column] of Object.entries(columns)) {
+      if (updates[key] === undefined) continue;
+      values.push(typeof updates[key] === "string" ? updates[key].trim() : updates[key]);
+      assignments.push(`${column} = $${values.length + 1}`);
+    }
+
+    if (assignments.length === 0) {
+      throw new AppError("Provide at least one field to update.", { status: 422, code: "NOTHING_TO_UPDATE" });
+    }
+
+    let updated;
+    try {
+      updated = await queryOne(
+        `UPDATE courses SET ${assignments.join(", ")} WHERE id = $1
+         RETURNING id, course_code, name, level, is_active, credit_hours, department_id`,
+        [courseId, ...values],
+        "admin:updateCourse",
+      );
+    } catch (error) {
+      if (error.code === "DUPLICATE") {
+        throw new ConflictError("A course with that code already exists.", { code: "DUPLICATE", fields: { courseCode: "That course code is already in use." } });
+      }
+      throw error;
+    }
+
+    const wasArchived = updates.isActive !== undefined && existing.is_active !== updates.isActive;
+    await recordAudit({
+      actor: req.user,
+      req,
+      action: wasArchived && updates.isActive === false ? AUDIT.COURSE_ARCHIVED : AUDIT.COURSE_UPDATED,
+      entityType: "course",
+      entityId: courseId,
+      metadata: { courseCode: updated.course_code, changes: Object.keys(updates) },
+    });
+
+    return ok(res, { course: updated });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Catalogue requests — the admin approval path.
+//
+// Students can only ask; the catalogue grows here. Approving creates the
+// entity inside the same transaction that resolves the request.
+// ---------------------------------------------------------------------------
+
+/** GET /api/admin/catalogue-requests — the request queue. */
+router.get(
+  "/catalogue-requests",
+  searchLimiter,
+  validate({ query: adminCatalogueRequestQuerySchema }),
+  asyncHandler(async (req, res) => {
+    const requests = await catalogue.listAdminRequests({ status: req.query.status });
+    return ok(res, { requests });
+  }),
+);
+
+/** POST /api/admin/catalogue-requests/:catalogueRequestId/approve */
+router.post(
+  "/catalogue-requests/:catalogueRequestId/approve",
+  writeLimiter,
+  validate({ params: catalogueRequestIdParamSchema, body: approveCatalogueRequestSchema }),
+  asyncHandler(async (req, res) => {
+    const result = await catalogue.approveRequest(req.user.id, req.params.catalogueRequestId, req.body, { req });
+    return ok(res, result);
+  }),
+);
+
+/** POST /api/admin/catalogue-requests/:catalogueRequestId/decline */
+router.post(
+  "/catalogue-requests/:catalogueRequestId/decline",
+  writeLimiter,
+  validate({ params: catalogueRequestIdParamSchema, body: declineCatalogueRequestSchema }),
+  asyncHandler(async (req, res) => {
+    const result = await catalogue.declineRequest(req.user.id, req.params.catalogueRequestId, req.body, { req });
+    return ok(res, result);
+  }),
+);
+
+
 router.get(
   "/search",
   searchLimiter,

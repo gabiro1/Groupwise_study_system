@@ -16,11 +16,13 @@ import studentsRoutes from "../routes/students.routes.js";
 import studyGroupsRoutes from "../routes/studyGroups.routes.js";
 import partnersRoutes from "../routes/partners.routes.js";
 import workspacesRoutes from "../routes/workspaces.routes.js";
+import sessionsRoutes from "../routes/sessions.routes.js";
+import meetingsRoutes from "../routes/meetings.routes.js";
 import recommendationsRoutes from "../routes/recommendations.routes.js";
 import aiRoutes from "../routes/ai.routes.js";
 import notificationsRoutes from "../routes/notifications.routes.js";
-import lecturerRoutes from "../routes/lecturer.routes.js";
 import adminRoutes, { reportRouter } from "../routes/admin.routes.js";
+import adminManagementRoutes from "../routes/adminManagement.routes.js";
 import researchRoutes from "../routes/research.routes.js";
 import contactRoutes from "../routes/contact.routes.js";
 
@@ -153,10 +155,15 @@ export function createApp() {
   app.use("/api/study-groups", studyGroupsRoutes);
   app.use("/api/partners", partnersRoutes);
   app.use("/api/workspaces", workspacesRoutes);
+  app.use("/api/sessions", sessionsRoutes);
+  app.use("/api/meetings", meetingsRoutes);
   app.use("/api/recommendations", recommendationsRoutes);
   app.use("/api/ai", aiRoutes);
   app.use("/api/notifications", notificationsRoutes);
-  app.use("/api/lecturer", lecturerRoutes);
+  // The management surface (group leaders, workspaces, sessions, analytics, AI
+  // config, announcements) is mounted first so its specific paths resolve before
+  // the older admin router's catch-alls.
+  app.use("/api/admin", adminManagementRoutes);
   app.use("/api/admin", adminRoutes);
   app.use("/api/research", researchRoutes);
   app.use("/api/contact", contactRoutes);

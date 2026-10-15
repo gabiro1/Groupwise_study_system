@@ -47,6 +47,23 @@ function translateDatabaseError(error, context) {
     detail: error.detail,
   });
 
+  // Domain trigger guards (session/meeting overlap) raise with a marker in the
+  // message. Map them to 409 before the generic code switch — the driver
+  // reports them as P0001, which would otherwise become a 500.
+  const marker = `${error.message || ""} ${error.detail || ""} ${error.hint || ""}`;
+  if (marker.includes("MEETING_OVERLAP") || marker.includes("Another meeting already occupies")) {
+    return Object.assign(new Error("Another meeting already occupies part of that time slot."), {
+      status: 409,
+      code: "MEETING_OVERLAP",
+    });
+  }
+  if (marker.includes("SESSION_OVERLAP")) {
+    return Object.assign(new Error("Another session already occupies part of that time slot."), {
+      status: 409,
+      code: "SESSION_OVERLAP",
+    });
+  }
+
   switch (error.code) {
     case "23505":
       return Object.assign(new Error("That record already exists."), {

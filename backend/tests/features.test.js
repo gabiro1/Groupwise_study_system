@@ -13,6 +13,7 @@ import {
   activityCompatibility,
   dataConfidence,
   resolveLevel,
+  preferenceTextSimilarity,
 } from "../src/lib/features.js";
 
 /**
@@ -378,6 +379,42 @@ describe("dataConfidence", () => {
   it("scales with the number of populated signals", () => {
     const partial = { courses: ["c1"], goals: ["g1"] };
     assert.ok(dataConfidence(partial) > 0 && dataConfidence(partial) < 0.5);
+  });
+});
+
+describe("preferenceTextSimilarity", () => {
+  it("rewards notes that describe the same kind of session", () => {
+    const a = "Quiet morning sessions, focused on exam prep.";
+    const b = "Exam prep, quiet mornings, focused sessions.";
+    assert.ok(preferenceTextSimilarity(a, b) > 0.5);
+  });
+
+  it("scores unrelated notes below related ones", () => {
+    const related = preferenceTextSimilarity(
+      "Someone calm who likes quiet mornings",
+      "Quiet mornings and a calm partner",
+    );
+    const unrelated = preferenceTextSimilarity(
+      "Someone calm who likes quiet mornings",
+      "Loud group WhatsApp banter at night",
+    );
+    assert.ok(unrelated < related);
+  });
+
+  it("ignores case and punctuation", () => {
+    assert.equal(preferenceTextSimilarity("Exam prep!", "exam prep"), 1);
+  });
+
+  it("is neutral (null) when either side is empty", () => {
+    assert.equal(preferenceTextSimilarity("Quiet mornings", ""), null);
+    assert.equal(preferenceTextSimilarity(null, "Quiet mornings"), null);
+    assert.equal(preferenceTextSimilarity("", undefined), null);
+  });
+
+  it("is symmetric", () => {
+    const a = "Quiet mornings, exam prep";
+    const b = "group study, evenings";
+    assert.equal(preferenceTextSimilarity(a, b), preferenceTextSimilarity(b, a));
   });
 });
 

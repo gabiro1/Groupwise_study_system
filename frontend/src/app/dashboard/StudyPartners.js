@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import AiMatchSearch from "./AiMatchSearch";
 
 async function apiRequest(path, options = {}) {
   const response = await fetch(`/api/${path}`, {
@@ -100,6 +101,8 @@ export default function StudyPartners() {
       </div>
       {error && <div className="feature-error" role="alert">{error}</div>}
       {message && <div className="feature-success" role="status">{message}</div>}
+
+      <AiMatchSearch kind="STUDENT" onNotice={setMessage} />
 
       {loading && <p className="empty-state" role="status">Loading your partner requests…</p>}
 

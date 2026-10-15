@@ -9,9 +9,9 @@ import { notifyMany } from "../lib/notifications.js";
  *
  * A workspace belongs to exactly one group, and **workspace membership is the
  * only access control that matters here**. Every function begins with
- * `assertMember` against the workspace's group. A lecturer is not a member of any
- * group workspace, which is what keeps private group conversations private —
- * there is no code path where a role alone grants read access.
+ * `assertMember` against the workspace's group. Only group members can reach a
+ * workspace, which is what keeps private group conversations private — there is
+ * no code path where a role alone grants read access.
  *
  * Every function takes `workspaceId` and resolves the group internally, so a
  * caller cannot supply a group id that disagrees with the workspace.

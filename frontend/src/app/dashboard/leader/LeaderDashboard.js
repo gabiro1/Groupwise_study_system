@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import BrandLogo from "../../BrandLogo";
 import ThemeToggle from "../../ThemeToggle";
-import { SECTIONS } from "./sections";
+import { SECTIONS, NAV_GROUPS } from "./sections";
 
 async function apiRequest(path, options, retryUnauthorized = true) {
   let response = await fetch(`/api/${path}`, {
@@ -68,6 +68,9 @@ const MODE_LABELS = { ONLINE: "Online", PHYSICAL: "In person", EITHER: "Either" 
 const PRIVACY_LABELS = { PUBLIC: "Public", REQUEST_REQUIRED: "Request to join", INVITE_ONLY: "Invite only" };
 const ROLE_LABELS = { OWNER: "Owner", MODERATOR: "Moderator", MEMBER: "Member" };
 
+// The primary sections shown in the compact mobile tab strip.
+const PRIMARY_SECTIONS = NAV_GROUPS.flatMap((group) => group.items).filter((item) => item.key);
+
 function LeaderIcon({ name, size = 18, strokeWidth = 1.8 }) {
   const shared = {
     width: size,
@@ -92,6 +95,15 @@ function LeaderIcon({ name, size = 18, strokeWidth = 1.8 }) {
     back: <><path d="M19 12H5" /><path d="m11 18-6-6 6-6" /></>,
     check: <path d="m5 12 4 4L19 6" />,
     close: <><path d="m18 6-12 12M6 6l12 12" /></>,
+    search: <><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></>,
+    workspace: <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></>,
+    layers: <><path d="m12 3 9 5-9 5-9-5 9-5Z" /><path d="m3 13 9 5 9-5" /><path d="m3 17 9 5 9-5" /></>,
+    folder: <path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
+    chat: <path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2Z" />,
+    video: <><rect x="3" y="6" width="13" height="12" rx="2" /><path d="m22 8-6 4 6 4V8Z" /></>,
+    partner: <><path d="M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="10" cy="7" r="4" /><path d="M20 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8" /></>,
+    bell: <><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.7 21a2 2 0 0 1-3.4 0" /></>,
+    plus: <><path d="M12 5v14M5 12h14" /></>,
   };
   return <svg {...shared}>{paths[name] || paths.home}</svg>;
 }
@@ -195,7 +207,7 @@ export default function LeaderDashboard({ initialSection = "overview", initialGr
           <div className="panel leader-empty">
             <h1>We could not open the leader dashboard</h1>
             <p className="feature-muted">{loadError}</p>
-            <Link className="button button-secondary" href="/dashboard">Back to the student dashboard</Link>
+            <Link className="button button-secondary" href="/dashboard/discover">Browse study groups</Link>
           </div>
         </div>
       </main>
@@ -231,28 +243,38 @@ export default function LeaderDashboard({ initialSection = "overview", initialGr
           <BrandLogo className="lien-logo" />
         </Link>
 
-        <div className="sidebar-nav-group">
-          <div className="sidebar-label">LEADERSHIP</div>
-          <nav className="side-nav" aria-label="Leader sections">
-            {SECTIONS.map((item) => {
-              const count = item.badge ? totals[item.badge] : 0;
-              return (
-                <div className="leader-nav-row" key={item.key}>
-                  <button
-                    type="button"
-                    className={`nav-link leader-nav-button ${section === item.key ? "active" : ""}`}
-                    aria-current={section === item.key ? "page" : undefined}
-                    onClick={() => setSection(item.key)}
-                  >
-                    <LeaderIcon name={item.icon} size={18} />
-                    <span>{item.label}</span>
-                    {count > 0 && <span className="leader-nav-badge">{count}</span>}
-                  </button>
-                </div>
-              );
-            })}
-          </nav>
-        </div>
+        {NAV_GROUPS.map((group) => (
+          <div className="sidebar-nav-group" key={group.label}>
+            <div className="sidebar-label">{group.label}</div>
+            <nav className="side-nav" aria-label={group.label}>
+              {group.items.map((item) => {
+                if (item.href) {
+                  return (
+                    <Link className="nav-link" href={item.href} key={item.label}>
+                      <LeaderIcon name={item.icon} size={18} />
+                      <span>{item.label}</span>
+                    </Link>
+                  );
+                }
+                const count = item.badge ? totals[item.badge] : 0;
+                return (
+                  <div className="leader-nav-row" key={item.key}>
+                    <button
+                      type="button"
+                      className={`nav-link leader-nav-button ${section === item.key ? "active" : ""}`}
+                      aria-current={section === item.key ? "page" : undefined}
+                      onClick={() => setSection(item.key)}
+                    >
+                      <LeaderIcon name={item.icon} size={18} />
+                      <span>{item.label}</span>
+                      {count > 0 && <span className="leader-nav-badge">{count}</span>}
+                    </button>
+                  </div>
+                );
+              })}
+            </nav>
+          </div>
+        ))}
 
         <div className="sidebar-nav-group">
           <div className="sidebar-label">YOUR GROUPS</div>
@@ -275,17 +297,13 @@ export default function LeaderDashboard({ initialSection = "overview", initialGr
 
         <div className="sidebar-spacer" />
         <div className="leader-sidebar-foot">
-          <Link className="nav-link" href="/dashboard">
-            <LeaderIcon name="back" size={18} />
-            <span>Student dashboard</span>
-          </Link>
           <ThemeToggle />
         </div>
       </aside>
 
       <section className="main-panel">
         <nav className="leader-mobile-nav" aria-label="Leader sections">
-          {SECTIONS.map((item) => {
+          {PRIMARY_SECTIONS.map((item) => {
             const count = item.badge ? totals[item.badge] : 0;
             return (
               <button
@@ -324,6 +342,14 @@ export default function LeaderDashboard({ initialSection = "overview", initialGr
                 </select>
               </label>
             )}
+            {section === "groups" && (
+              <div className="leader-heading-actions">
+                <Link className="button button-primary" href="/dashboard/groups?create=1">
+                  <LeaderIcon name="plus" size={16} />
+                  <span>Create a study group</span>
+                </Link>
+              </div>
+            )}
           </div>
 
           {section === "overview" && (
@@ -331,9 +357,21 @@ export default function LeaderDashboard({ initialSection = "overview", initialGr
               groups={groups}
               totals={totals}
               activeGroup={activeGroup}
+              identity={identity}
               refreshKey={refreshKey}
               navigate={navigate}
             />
+          )}
+          {section === "groups" && (
+            <GroupsSection
+              groups={groups}
+              activeGroup={activeGroup}
+              refreshKey={refreshKey}
+              navigate={navigate}
+            />
+          )}
+          {section === "resources" && (
+            <ResourcesSection groups={groups} refreshKey={refreshKey} />
           )}
           {section === "requests" && (
             <RequestsSection activeGroup={activeGroup} showToast={showToast} onRefreshOverview={reloadOverview} refreshKey={refreshKey} />
@@ -412,17 +450,51 @@ function useSectionData(path, deps, refreshKey) {
   };
 }
 
-function OverviewSection({ groups, totals, activeGroup, navigate, refreshKey }) {
+function OverviewSection({ groups, totals, activeGroup, identity, navigate, refreshKey }) {
   const { loading, error, data } = useSectionData("study-groups/leader/sessions?limit=6&scope=upcoming", [], refreshKey);
   const sessions = data?.sessions || [];
+  const groupCount = totals.groups ?? groups.length;
+  const pendingRequests = totals.pendingRequests ?? 0;
+  const pendingInvitations = totals.pendingInvitations ?? 0;
+  const pendingTotal = pendingRequests + pendingInvitations;
 
   return (
     <div className="leader-stack">
+      <section className="panel leader-card leader-welcome">
+        <div className="section-heading">
+          <div>
+            <span className="section-overline">WELCOME BACK</span>
+            <h2>Hi {displayNameOf(identity)}, you lead {groupCount} {groupCount === 1 ? "group" : "groups"}.</h2>
+          </div>
+        </div>
+        <p className="leader-muted">
+          {pendingTotal > 0
+            ? `You have ${pendingTotal} ${pendingTotal === 1 ? "item" : "items"} waiting on you across your groups.`
+            : "Everything is under control — nothing is waiting on a decision right now."}
+        </p>
+        {pendingTotal > 0 ? (
+          <div className="leader-actions">
+            {pendingRequests > 0 && (
+              <button type="button" className="button button-primary" onClick={() => navigate("requests", activeGroup?.id)}>
+                Review {pendingRequests} {pendingRequests === 1 ? "request" : "requests"}
+              </button>
+            )}
+            {pendingInvitations > 0 && (
+              <button type="button" className="button button-secondary" onClick={() => navigate("invitations", activeGroup?.id)}>
+                Review {pendingInvitations} {pendingInvitations === 1 ? "invitation" : "invitations"}
+              </button>
+            )}
+          </div>
+        ) : (
+          <p className="feature-success">You are all caught up.</p>
+        )}
+      </section>
+
       <div className="leader-stat-grid">
-        <StatCard label="Groups you lead" value={totals.groups ?? groups.length} />
-        <StatCard label="Active members" value={totals.activeMembers ?? 0} />
-        <StatCard label="Pending requests" value={totals.pendingRequests ?? 0} hint="Awaiting your decision" />
-        <StatCard label="Outstanding invitations" value={totals.pendingInvitations ?? 0} hint="Sent, not yet answered" />
+        <StatCard label="Groups you lead" value={groupCount} />
+        <StatCard label="Members you lead" value={totals.activeMembers ?? 0} hint="Unique people, not double-counted" />
+        <StatCard label="Pending requests" value={pendingRequests} hint="Awaiting your decision" />
+        <StatCard label="Outstanding invitations" value={pendingInvitations} hint="Sent, not yet answered" />
         <StatCard label="Upcoming sessions" value={totals.upcomingSessions ?? 0} />
       </div>
 
@@ -478,6 +550,126 @@ function OverviewSection({ groups, totals, activeGroup, navigate, refreshKey }) 
           </ul>
         </section>
       </div>
+    </div>
+  );
+}
+
+const RESOURCE_KIND_LABELS = { FILE: "File", NOTE: "Note", LINK: "Link" };
+
+function GroupsSection({ groups, activeGroup, navigate }) {
+  return (
+    <div className="leader-stack">
+      <section className="panel leader-card">
+        <div className="section-heading">
+          <div><span className="section-overline">GROUP MANAGEMENT</span><h2>Groups you lead <span className="heading-count">{groups.length}</span></h2></div>
+        </div>
+        <p className="leader-muted">
+          Everything you manage lives here. Open a group&apos;s members, requests or sessions, or jump into its workspace.
+        </p>
+        <div className="leader-group-cards">
+          {groups.map((group) => (
+            <article key={group.id} className={`leader-group-card ${activeGroup?.id === group.id ? "active" : ""}`}>
+              <div className="leader-group-card-head">
+                <h3>{group.name}</h3>
+                <span className="leader-badge">{ROLE_LABELS[group.my_role] || "Leader"}</span>
+              </div>
+              <p className="leader-muted">
+                {group.course_code ? `${group.course_code} · ` : ""}{group.course_name}
+              </p>
+              <div className="leader-mini-stats">
+                <span><strong>{group.active_members}</strong>/{group.max_size} members</span>
+                <span><strong>{group.pending_requests}</strong> requests</span>
+                <span><strong>{group.pending_invitations}</strong> invites</span>
+                <span><strong>{group.upcoming_sessions}</strong> sessions</span>
+              </div>
+              <div className="leader-actions">
+                <button type="button" className="button button-secondary" onClick={() => navigate("members", group.id)}>Members</button>
+                <button type="button" className="button button-secondary" onClick={() => navigate("requests", group.id)}>Requests</button>
+                <button type="button" className="button button-secondary" onClick={() => navigate("invitations", group.id)}>Invitations</button>
+                <button type="button" className="button button-secondary" onClick={() => navigate("sessions", group.id)}>Sessions</button>
+                <button type="button" className="button button-secondary" onClick={() => navigate("matching", group.id)}>Matching</button>
+                <button type="button" className="button button-secondary" onClick={() => navigate("analytics", group.id)}>Analytics</button>
+                <button type="button" className="button button-secondary" onClick={() => navigate("settings", group.id)}>Settings</button>
+                {group.workspace_id && (
+                  <Link className="button button-primary" href={`/dashboard/workspaces/${group.workspace_id}`}>Open workspace</Link>
+                )}
+              </div>
+              <p className="leader-muted leader-tiny">Last activity {formatDate(group.last_activity_at)}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ResourcesSection({ groups, refreshKey }) {
+  const [state, setState] = useState({ loading: true, error: "", byGroup: [] });
+  const [nonce, setNonce] = useState(0);
+  const managed = useMemo(() => groups.filter((group) => group.workspace_id), [groups]);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      setState((current) => ({ ...current, loading: true, error: "" }));
+      try {
+        const byGroup = await Promise.all(managed.map(async (group) => {
+          const data = await apiRequest(`workspaces/${group.workspace_id}/resources?limit=50`);
+          return { group, resources: data.resources || [] };
+        }));
+        if (active) setState({ loading: false, error: "", byGroup });
+      } catch (error) {
+        if (active) setState({ loading: false, error: error.message, byGroup: [] });
+      }
+    })();
+    return () => { active = false; };
+  }, [managed, nonce, refreshKey]);
+
+  return (
+    <div className="leader-stack">
+      <section className="panel leader-card">
+        <div className="section-heading">
+          <div><span className="section-overline">GROUP RESOURCES</span><h2>Study material across your groups</h2></div>
+          <button type="button" className="button button-secondary" disabled={state.loading} onClick={() => setNonce((value) => value + 1)}>Refresh</button>
+        </div>
+        <p className="leader-muted">
+          Resources live in each group&apos;s workspace. You only ever see material from the groups you lead.
+        </p>
+        {state.loading && <p className="feature-muted">Loading resources…</p>}
+        {state.error && <p className="feature-error">{state.error}</p>}
+        {!state.loading && !state.error && managed.length === 0 && (
+          <p className="feature-muted">None of your groups have an active workspace yet.</p>
+        )}
+        {!state.loading && !state.error && state.byGroup.map(({ group, resources }) => (
+          <div className="leader-resource-group" key={group.id}>
+            <div className="section-heading leader-split">
+              <div><h3>{group.name} <span className="heading-count">{resources.length}</span></h3></div>
+              <Link className="button button-secondary" href={`/dashboard/workspaces/${group.workspace_id}?tab=resources`}>Manage in workspace</Link>
+            </div>
+            {resources.length === 0 ? (
+              <p className="feature-muted">No resources added yet.</p>
+            ) : (
+              <ul className="leader-list">
+                {resources.map((resource) => (
+                  <li key={resource.id} className="leader-list-row">
+                    <div>
+                      <strong>{resource.title}</strong>
+                      <span className="leader-muted">
+                        {RESOURCE_KIND_LABELS[resource.kind] || resource.kind}
+                        {resource.uploader_first_name ? ` · ${resource.uploader_first_name} ${resource.uploader_last_name || ""}` : ""}
+                        {resource.created_at ? ` · ${formatDate(resource.created_at)}` : ""}
+                      </span>
+                    </div>
+                    {resource.external_url && (
+                      <a className="button button-secondary" href={resource.external_url} target="_blank" rel="noreferrer">Open link</a>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ))}
+      </section>
     </div>
   );
 }

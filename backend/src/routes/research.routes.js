@@ -25,8 +25,8 @@ const router = Router();
  * SQL would be difficult, but because a dataset that can be sliced to one person
  * stops being research data and becomes a surveillance tool.
  *
- * Platform-wide views require ADMIN; a lecturer's views are pinned to the courses
- * they teach, with no parameter that widens that scope.
+ * These analytics are an administrator surface: every route below requires the
+ * ADMIN role, so there is no per-learner scope to widen.
  */
 
 // The role guard below depends on `req.user`, so `requireAuth` must run first.
@@ -49,8 +49,8 @@ router.get(
 
     const coverage = await dataCoverage({ from, to, courseIds });
 
-    // Stated as guidance rather than a hard gate: a lecturer looking at their own
-    // course with three groups should still see those three groups.
+    // Stated as guidance rather than a hard gate: a course with three groups
+    // should still show those three groups.
     return ok(res, {
       coverage,
       adequacy: {

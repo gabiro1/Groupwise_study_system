@@ -8,8 +8,10 @@ import StudentRecommendations from "./StudentRecommendations";
 import StudentProfile from "./StudentProfile";
 import NotificationsInbox from "./NotificationsInbox";
 import StudyWorkspace from "./StudyWorkspace";
-import StudentSummary from "./StudentSummary";
 import StudyPartners from "./StudyPartners";
+import AiMatchSearch from "./AiMatchSearch";
+import FloatingAssistant from "./FloatingAssistant";
+import MeetingsLazy from "./meetings/MeetingsLazy";
 import ThemeToggle from "../ThemeToggle";
 
 const navGroups = [
@@ -26,6 +28,7 @@ const navGroups = [
     label: "COMMUNICATION",
     items: [
       { label: "Messages", icon: "chat", href: "/dashboard/messages" },
+      { label: "Meetings", icon: "video", href: "/dashboard/meetings" },
       { label: "Partners", icon: "partner", href: "/dashboard/partners" },
       { label: "Notifications", icon: "bell", href: "/dashboard/notifications" },
     ],
@@ -55,6 +58,8 @@ const sectionTitles = {
   groups: "My Groups",
   workspaces: "Workspaces",
   messages: "Messages",
+  meetings: "Meetings",
+  meetingDetail: "Meetings",
   partners: "Study partners",
   sessions: "Study sessions",
   courses: "My courses",
@@ -101,6 +106,7 @@ function Icon({ name, size = 18, strokeWidth = 1.8 }) {
     settings: <><circle cx="12" cy="12" r="3" /><path d="m19.4 15 .1.1 1.2 2.1-2.1 2.1-2.2-1.2h-.2a7.4 7.4 0 0 1-1.7.7l-.2.1-.7 2.4h-3l-.7-2.4-.2-.1a7.4 7.4 0 0 1-1.7-.7h-.2l-2.2 1.2-2.1-2.1 1.2-2.2v-.2a7.4 7.4 0 0 1-.7-1.7l-.1-.2-2.4-.7v-3l2.4-.7.1-.2a7.4 7.4 0 0 1 .7-1.7v-.2L3.5 5.3l2.1-2.1 2.2 1.2H8a7.4 7.4 0 0 1 1.7-.7l.2-.1.7-2.4h3l.7 2.4.2.1a7.4 7.4 0 0 1 1.7.7h.2l2.2-1.2 2.1 2.1-1.2 2.2v.2a7.4 7.4 0 0 1 .7 1.7l.1.2 2.4.7v3l-2.4.7-.1.2a7.4 7.4 0 0 1-.7 1.7Z" transform="translate(-1.5 -1.5) scale(1.12)" /></>,
     close: <><path d="m18 6-12 12M6 6l12 12" /></>,
     menu: <><path d="M4 6h16M4 12h16M4 18h16" /></>,
+    video: <><rect x="2" y="6" width="13" height="12" rx="2" /><path d="m15 10 6-3v10l-6-3" /></>,
   };
 
   return <svg {...shared}>{paths[name] || paths.home}</svg>;
@@ -721,13 +727,14 @@ useEffect(() => {
   );
 }
 
-function DashboardSection({ section, search, setSearch, searchRef, groups, workspaces, workspaceGroupId, courses, sessions, loading, onJoin, onArchiveWorkspace, onCreateGroup, profile, onProfileSaved, onNotice, onUnreadChange, identity, initialConversationId }) {
+function DashboardSection({ section, search, setSearch, searchRef, groups, workspaces, workspaceGroupId, courses, sessions, loading, onJoin, onArchiveWorkspace, onCreateGroup, profile, onProfileSaved, onNotice, onUnreadChange, identity, initialConversationId, meetingId }) {
   const [manageGroupId, setManageGroupId] = useState("");
   const [reportGroupId, setReportGroupId] = useState("");
   if (section === "recommendations") return <StudentRecommendations onJoin={onJoin} />;
   if (section === "profile") return <StudentProfile initialProfile={profile} onSaved={onProfileSaved} onNotice={onNotice} />;
   if (section === "notifications") return <NotificationsInbox onUnreadChange={onUnreadChange} />;
-  if (section === "messages") return <MessagesSection workspaces={workspaces} loading={loading} identity={identity} initialConversationId={initialConversationId} />;
+  if (section === "messages") return <MessagesSection workspaces={workspaces} loading={loading} identity={identity} initialConversationId={initialConversationId} meetingId={meetingId} />;
+  if (section === "meetings" || section === "meetingDetail") return <MeetingsLazy section={section} meetingId={meetingId} groups={groups.mine || []} />;
   if (section === "workspaces") {
     const filteredWorkspaces = workspaces.filter((workspace) =>
       (!workspaceGroupId || workspace.groupId === workspaceGroupId)
@@ -838,6 +845,7 @@ function DashboardSection({ section, search, setSearch, searchRef, groups, works
             />
           </label>
         )}
+        {isDiscover && <AiMatchSearch kind="GROUP" onJoin={onJoin} onNotice={onNotice} />}
         <section className="panel section-panel">
           <div className="section-heading">
             <div><span className="section-overline">{isDiscover ? "FROM YOUR STUDY COMMUNITY" : "YOUR ACTIVE GROUPS"}</span><h2>{isDiscover ? "Groups to explore" : "All groups"} <span className="heading-count">{filteredGroups.length}</span></h2></div>
@@ -949,7 +957,7 @@ function DashboardSection({ section, search, setSearch, searchRef, groups, works
   );
 }
 
-export default function DashboardWorkspace({ section = "overview", workspaceId, workspaceTab, workspaceGroupId, initialConversationId }) {
+export default function DashboardWorkspace({ section = "overview", workspaceId, workspaceTab, workspaceGroupId, initialConversationId, meetingId }) {
   const [search, setSearch] = useState("");
   const [notice, setNotice] = useState("");
   const [identity, setIdentity] = useState(null);
@@ -981,7 +989,6 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
   const [discoveredGroups, setDiscoveredGroups] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
-  const [leadsGroups, setLeadsGroups] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadedDiscoverySearch, setLoadedDiscoverySearch] = useState(null);
   const [loadError, setLoadError] = useState("");
@@ -1016,8 +1023,14 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
 
       if (!active) return;
       if (auth.user?.role !== "STUDENT") {
+        // Route other roles to their own home rather than showing an access
+        // error they cannot act on. A lecturer belongs in /dashboard/lecturer.
         if (auth.user?.role === "ADMIN") {
           window.location.replace("/admin");
+          return;
+        }
+        if (auth.user?.role === "LECTURER") {
+          window.location.replace("/dashboard/lecturer");
           return;
         }
         setLoadError("Your account is signed in, but it does not have student access to this dashboard.");
@@ -1035,10 +1048,16 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
           apiRequest("study-groups/leader/overview").catch(() => ({ groups: [] })),
         ]);
         if (!active) return;
+        // Group leaders belong in their dedicated dashboard. Only the landing
+        // view redirects, so the shared student pages (Discover, Messages, …)
+        // stay reachable for them.
+        if (section === "overview" && (leaderResult.groups || []).length > 0) {
+          window.location.replace("/dashboard/leader");
+          return;
+        }
         const memberGroups = (groupResult.groups || []).map(normaliseGroup);
         setProfile(student.profile);
         setMyGroups(memberGroups);
-        setLeadsGroups((leaderResult.groups || []).length > 0);
         setWorkspaces((workspaceResult.workspaces || []).map(normaliseWorkspace));
         setUnreadNotifications(notificationResult.unreadCount || 0);
         const activeWorkspaces = (workspaceResult.workspaces || []).map(normaliseWorkspace);
@@ -1057,6 +1076,11 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
         if (!active) return;
         setSessions(groupSessions.flat().sort((a, b) => new Date(a.startsAt) - new Date(b.startsAt)));
         setLoading(false);
+        // Deep link from the leader dashboard: /dashboard/groups?create=1 opens
+        // the create-group flow straight away.
+        if (section === "groups" && new URLSearchParams(window.location.search).get("create") === "1") {
+          openGroupCreate();
+        }
       } catch (error) {
         if (!active) return;
         if (error.status === 401 && error.path === "auth/me") {
@@ -1072,6 +1096,7 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
 
     loadDashboard();
     return () => { active = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -1516,18 +1541,6 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
           </div>
         )}
 
-        {leadsGroups && (
-          <div className="sidebar-nav-group">
-            <div className="sidebar-label">LEADERSHIP</div>
-            <nav className="side-nav" aria-label="Leadership">
-              <Link className="nav-link" href="/dashboard/leader">
-                <Icon name="users" size={18} />
-                <span>Group leadership</span>
-              </Link>
-            </nav>
-          </div>
-        )}
-
         <div className="sidebar-spacer" />
         <div className="weekly-card">
           <div className="weekly-icon"><Icon name="check" size={17} /></div>
@@ -1639,8 +1652,6 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
             </Link>
           </section>
 
-          <StudentSummary />
-
           <section className="hero-card" aria-label="Weekly study progress">
             <div className="hero-content">
               <div className="hero-kicker">YOUR WEEKLY MOMENTUM</div>
@@ -1730,7 +1741,7 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
 
           </>
           ) : (
-            <DashboardSection section={section} search={search} setSearch={setSearch} searchRef={searchRef} groups={pageGroups} workspaces={workspaces} workspaceGroupId={workspaceGroupId} courses={courses} sessions={sessions} loading={loading || discoverLoading} onJoin={joinGroup} onArchiveWorkspace={archiveWorkspace} onCreateGroup={openGroupCreate} profile={profile} onProfileSaved={updateProfile} onNotice={showNotice} onUnreadChange={updateUnreadCount} identity={identity} initialConversationId={initialConversationId} />
+            <DashboardSection section={section} search={search} setSearch={setSearch} searchRef={searchRef} groups={pageGroups} workspaces={workspaces} workspaceGroupId={workspaceGroupId} courses={courses} sessions={sessions} loading={loading || discoverLoading} onJoin={joinGroup} onArchiveWorkspace={archiveWorkspace} onCreateGroup={openGroupCreate} profile={profile} onProfileSaved={updateProfile} onNotice={showNotice} onUnreadChange={updateUnreadCount} identity={identity} initialConversationId={initialConversationId} meetingId={meetingId} />
           )}
         </div>
       </section>
@@ -1942,6 +1953,7 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
         ))}
       </nav>
       <div className={`toast ${notice ? "visible" : ""}`} role="status" aria-live="polite">{notice}</div>
+      <FloatingAssistant />
     </main>
     </>
   );

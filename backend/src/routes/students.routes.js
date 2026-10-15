@@ -1,11 +1,12 @@
 import { Router } from "express";
-import { asyncHandler, ok } from "../lib/http.js";
+import { asyncHandler, ok, created } from "../lib/http.js";
 import { validate } from "../middleware/validate.js";
 import { requireStudent, requireAuth } from "../middleware/auth.js";
 import { writeLimiter, searchLimiter } from "../middleware/rateLimit.js";
 import { z } from "zod";
 import * as students from "../services/student.service.js";
 import * as discovery from "../services/discovery.service.js";
+import * as catalogue from "../services/catalogue.service.js";
 import {
   profileUpdateSchema,
   studentCoursesSchema,
@@ -17,6 +18,7 @@ import {
   onboardingStepSchema,
   privacySettingsSchema,
   studentSearchSchema,
+  catalogueRequestSchema,
 } from "../lib/schemas.js";
 
 const router = Router();
@@ -27,8 +29,9 @@ router.use(requireAuth);
 /**
  * Student profile and discovery endpoints.
  *
- * All routes require a STUDENT role: a lecturer has no student profile, and
- * `requireStudent` keeps that distinction explicit rather than implicit.
+ * All routes require a STUDENT role (group leaders included): every account here
+ * has a student profile, and `requireStudent` keeps that distinction explicit
+ * rather than implicit.
  */
 
 const studentIdParamSchema = z.object({ studentId: z.string().uuid() });
@@ -44,7 +47,7 @@ const studentIdParamSchema = z.object({ studentId: z.string().uuid() });
  */
 router.get(
   "/me",
-  requireAuth,
+  requireStudent,
   asyncHandler(async (req, res) => {
     const profile = await students.getProfileBundle(req.user.id);
     return ok(res, { profile });
@@ -250,6 +253,29 @@ router.get(
   asyncHandler(async (req, res) => {
     const groups = await discovery.getSharedGroups(req.user.id, req.params.studentId);
     return ok(res, { groups });
+  }),
+);
+
+/** POST /api/students/me/catalogue-requests — ask for a missing course/skill/topic. */
+router.post(
+  "/me/catalogue-requests",
+  requireStudent,
+  writeLimiter,
+  validate({ body: catalogueRequestSchema }),
+  asyncHandler(async (req, res) => {
+    const result = await catalogue.createRequest(req.user.id, req.body, { req });
+    return created(res, result);
+  }),
+);
+
+/** GET /api/students/me/catalogue-requests — the student’s own requests. */
+router.get(
+  "/me/catalogue-requests",
+  requireStudent,
+  searchLimiter,
+  asyncHandler(async (req, res) => {
+    const requests = await catalogue.listMyRequests(req.user.id);
+    return ok(res, { requests });
   }),
 );
 

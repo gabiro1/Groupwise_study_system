@@ -1,4 +1,4 @@
-﻿-- =============================================================================
+-- =============================================================================
 -- Lien â€” 004_workspace.sql
 -- Study plans, topics, tasks, sessions, resources, chat, progress.
 -- All tables here are scoped to a workspace/group and every access is guarded

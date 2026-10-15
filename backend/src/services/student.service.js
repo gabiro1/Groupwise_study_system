@@ -211,7 +211,7 @@ export async function getProfileBundle(studentId) {
       ),
       queryOne(
         `SELECT preferred_mode, preferred_style, min_group_size, max_group_size,
-                session_minutes, weekly_goal_hours, preferred_days
+                session_minutes, weekly_goal_hours, preferred_days, partner_preferences
            FROM study_preferences WHERE student_id = $1`,
         [studentId],
         "student:bundlePrefs",
@@ -318,6 +318,7 @@ export async function getProfileBundle(studentId) {
           sessionMinutes: preferences.session_minutes,
           weeklyGoalHours: preferences.weekly_goal_hours,
           preferredDays: preferences.preferred_days ?? [],
+          partnerPreferences: preferences.partner_preferences,
         }
       : null,
     privacy: privacy
@@ -759,8 +760,8 @@ function dayName(day) {
 export async function setPreferences(studentId, preferences) {
   await query(
     `INSERT INTO study_preferences
-       (student_id, preferred_mode, preferred_style, min_group_size, max_group_size, session_minutes, weekly_goal_hours)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (student_id, preferred_mode, preferred_style, min_group_size, max_group_size, session_minutes, weekly_goal_hours, partner_preferences)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      ON CONFLICT (student_id) DO UPDATE
        SET preferred_mode = EXCLUDED.preferred_mode,
            preferred_style = EXCLUDED.preferred_style,
@@ -768,6 +769,7 @@ export async function setPreferences(studentId, preferences) {
            max_group_size = EXCLUDED.max_group_size,
            session_minutes = EXCLUDED.session_minutes,
            weekly_goal_hours = EXCLUDED.weekly_goal_hours,
+           partner_preferences = EXCLUDED.partner_preferences,
            updated_at = now()`,
     [
       studentId,
@@ -777,12 +779,13 @@ export async function setPreferences(studentId, preferences) {
       preferences.maxGroupSize,
       preferences.sessionMinutes,
       preferences.weeklyGoalHours ?? 4,
+      preferences.partnerPreferences ?? null,
     ],
     "student:setPreferences",
   );
 
   const row = await queryOne(
-    `SELECT preferred_mode, preferred_style, min_group_size, max_group_size, session_minutes, weekly_goal_hours
+    `SELECT preferred_mode, preferred_style, min_group_size, max_group_size, session_minutes, weekly_goal_hours, partner_preferences
        FROM study_preferences WHERE student_id = $1`,
     [studentId],
     "student:readPrefs",
@@ -796,6 +799,7 @@ export async function setPreferences(studentId, preferences) {
     maxGroupSize: row.max_group_size,
     sessionMinutes: row.session_minutes,
     weeklyGoalHours: row.weekly_goal_hours,
+    partnerPreferences: row.partner_preferences,
   };
 }
 

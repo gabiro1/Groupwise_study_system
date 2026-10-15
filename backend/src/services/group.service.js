@@ -1248,11 +1248,29 @@ export async function leaderOverview(userId) {
     "groups:leaderOverview",
   );
 
+  // Members are counted per person, not per membership: a student who belongs to
+  // two of the caller's groups is one member, not two. Summing active_members
+  // across groups would inflate the total, so it is counted distinctly here.
+  const memberTotals = await queryOne(
+    `SELECT count(DISTINCT m.student_id)::int AS active_members
+       FROM study_group_members m
+       JOIN study_groups g ON g.id = m.group_id
+      WHERE g.status = 'ACTIVE'
+        AND m.left_at IS NULL
+        AND m.group_id IN (
+          SELECT gm.group_id FROM study_group_members gm
+           WHERE gm.student_id = $1 AND gm.left_at IS NULL
+             AND gm.role IN ('OWNER', 'MODERATOR')
+        )`,
+    [userId],
+    "groups:leaderOverviewMembers",
+  );
+
   return {
     groups,
     totals: {
       groups: groups.length,
-      activeMembers: groups.reduce((sum, group) => sum + group.active_members, 0),
+      activeMembers: memberTotals?.active_members ?? 0,
       pendingRequests: groups.reduce((sum, group) => sum + group.pending_requests, 0),
       pendingInvitations: groups.reduce((sum, group) => sum + group.pending_invitations, 0),
       upcomingSessions: groups.reduce((sum, group) => sum + group.upcoming_sessions, 0),

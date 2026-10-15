@@ -44,31 +44,15 @@ function resolveWindow({ from, to }) {
 /**
  * Resolve the courses a request is allowed to see.
  *
- * Returns `null` for an unrestricted (platform-wide) view, or the concrete list of
- * course ids otherwise. A lecturer asking for "all courses" therefore gets the
- * union of the courses they actually teach and no others, so scope cannot be
- * widened by omitting the `courseId` filter.
+ * These analytics are an administrator surface. An explicit course narrows the
+ * view; the absence of one means "every course".
  */
 async function resolveCourseScope(actor, courseId) {
-  // An explicit course narrows for everyone, including admins. Only the *absence* of
-  // one means "everything you are allowed to see".
-  if (actor.role === "ADMIN") return courseId ? [courseId] : null;
-
-  const assigned = await queryRows(
-    "SELECT course_id FROM lecturer_courses WHERE lecturer_id = $1",
-    [actor.id],
-    "research:assignedCourses",
-  );
-  const allowed = new Set(assigned.map((row) => row.course_id));
-
-  if (courseId) {
-    if (!allowed.has(courseId)) throw new ForbiddenError("You are not assigned to that course.");
-    return [courseId];
+  if (actor.role !== "ADMIN") {
+    throw new ForbiddenError("Platform analytics are restricted to administrators.");
   }
 
-  // An empty list is not the same as "no filter": `ANY('{}')` matches nothing, which
-  // is the correct answer for a lecturer who teaches nothing yet.
-  return [...allowed];
+  return courseId ? [courseId] : null;
 }
 
 /**

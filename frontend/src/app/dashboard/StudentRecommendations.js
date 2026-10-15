@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import AiMatchSearch from "./AiMatchSearch";
 
 async function apiRequest(path, options = {}) {
   const response = await fetch(`/api/${path}`, {
@@ -173,6 +174,7 @@ export default function StudentRecommendations({ onJoin, compact = false }) {
         {compact ? <h2>Recommended study groups for you</h2> : <h1>Recommended for you</h1>}
         <p>Suggestions use the courses, topics, study preferences, and availability in your profile.</p>
       </div>
+      {!compact && <AiMatchSearch key={kind} kind={kind} onJoin={onJoin} />}
       {!compact && (
         <div className="recommendation-tabs" role="tablist" aria-label="Recommendation type">
           {KINDS.map((entry) => (

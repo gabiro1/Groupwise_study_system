@@ -89,10 +89,18 @@ for (const name of readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql"))) {
 
   // Columns added after the fact (generated search documents) are part of the
   // schema; treating them as missing would train us to ignore the check.
-  const alter = /ALTER TABLE\s+([\w.]+)\s+ADD COLUMN\s+(?:IF NOT EXISTS\s+)?([a-z_][a-z0-9_]*)\s+([a-z_][a-z0-9_]*)/gi;
-  while ((match = alter.exec(sql))) {
-    const table = match[1].replace(/^public\./, "");
-    tables.get(table)?.set(match[2].toLowerCase(), match[3].toLowerCase());
+  // One `ALTER TABLE` can carry several comma-separated `ADD COLUMN`s, so the
+  // column pickups are matched inside each ALTER statement individually.
+  const alterStatement = /ALTER TABLE\s+([\w.]+)\s*([\s\S]*?);/gi;
+  let alterMatch;
+  while ((alterMatch = alterStatement.exec(sql))) {
+    const table = alterMatch[1].replace(/^public\./, "");
+    const block = alterMatch[2];
+    const addColumn = /ADD COLUMN\s+(?:IF NOT EXISTS\s+)?([a-z_][a-z0-9_]*)\s+([a-z_][a-z0-9_]*)/gi;
+    let column;
+    while ((column = addColumn.exec(block))) {
+      tables.get(table)?.set(column[1].toLowerCase(), column[2].toLowerCase());
+    }
   }
 }
 

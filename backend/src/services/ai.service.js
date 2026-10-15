@@ -1,6 +1,8 @@
 import env from "../config/env.js";
 import { AiUnavailableError } from "../lib/errors.js";
 import logger from "../config/logger.js";
+import { callProvider as invokeProvider } from "../modules/ai/orchestration.js";
+import { getTargets } from "../modules/ai/registry.js";
 
 /**
  * Natural-language intent extraction.
@@ -44,21 +46,25 @@ function buildSystemPrompt({ courses, topics, goals }) {
     "",
     "You are NOT matching students and you are NOT scoring compatibility. You only extract stated requirements.",
     "",
-    "Return ONLY a JSON object with these keys, omitting any you cannot determine from the text:",
+    "Return ONLY a JSON object with these keys (omit any you cannot determine):",
     '  "courseIds": array of course ids the student explicitly asked for',
-    '  "topicIds": array of topic ids the student explicitly asked for',
+    '  "topicIds": array of topic ids',
     '  "goalId": id of the single best-matching learning goal, or null',
     '  "availability": array of { "dayOfWeek": 0-6, "startMinute": 0-1440, "endMinute": 0-1440 }',
     '  "preferredMode": "ONLINE" | "PHYSICAL" | "EITHER"',
-    '  "minGroupSize": integer 2-12, "maxGroupSize": integer 2-12',
+    '  "minGroupSize": integer 2-12',
+    '  "maxGroupSize": integer 2-12',
     "",
     "Rules:",
-    "- Use ONLY the ids listed below. Never invent an id. An id you are unsure about is worse than an omission.",
-    "- Do not guess a course from a topic name if no course was given.",
-    "- Times are minutes since midnight, local to the student. \"Tuesday evening\" is dayOfWeek 2, 18:00-21:00.",
-    "- dayOfWeek: 0=Sunday, 1=Monday, 6=Saturday.",
+    "- Prefer the ids listed below, copied EXACTLY. If the student names a course by its code or name, return that course's id.",
+    "- preferredMode MUST be one of the three uppercase values. Use EITHER when unspecified.",
+    "- availability MUST be structured numbers, never a phrase. dayOfWeek is 0=Sunday .. 6=Saturday.",
+    "  Convert time words: morning=540-720, afternoon=720-1020, evening=1020-1260, night=1200-1380.",
+    "- Convert group-size words: small=2-4, medium=3-6, large=6-12.",
+    '- Example: "small calculus group Wednesday afternoon online" ->',
+    '  {"courseIds":["<calculus id>"],"availability":[{"dayOfWeek":3,"startMinute":720,"endMinute":1020}],"preferredMode":"ONLINE","minGroupSize":2,"maxGroupSize":4}',
     "- If the request names no constraint at all, return {}.",
-    "- Do not include commentary, prose or explanations. JSON only.",
+    "- JSON only: no prose, no markdown fences, no commentary.",
     "",
     "AVAILABLE COURSES (id | code | name):",
     ...courses.map((course) => `  ${course.id} | ${course.course_code} | ${course.name}`),
@@ -88,9 +94,9 @@ export async function parseNaturalLanguage(text, eligible, studentId) {
   const systemPrompt = buildSystemPrompt(eligible);
 
   const startedAt = process.hrtime.bigint();
-  let raw;
+  let result;
   try {
-    raw = await callProvider([{ role: "system", content: systemPrompt }, { role: "user", content: text }]);
+    result = await callProvider([{ role: "system", content: systemPrompt }, { role: "user", content: text }]);
   } catch (error) {
     // A provider outage degrades the feature; it must not surface as a 500.
     logger.warn("AI intent parse failed", {
@@ -100,6 +106,8 @@ export async function parseNaturalLanguage(text, eligible, studentId) {
     });
     throw new AiUnavailableError();
   }
+
+  const raw = result.text;
 
   const latencyMs = Math.round(Number(process.hrtime.bigint() - startedAt) / 1e6);
   const intent = sanitise(parseJson(raw), eligible);
@@ -115,7 +123,7 @@ export async function parseNaturalLanguage(text, eligible, studentId) {
   return {
     ...intent,
     naturalLanguage: text,
-    parserModel: env.AI_CHAT_MODEL,
+    parserModel: result.model,
     latencyMs,
   };
 }
@@ -154,33 +162,25 @@ function parseJson(raw) {
  * an invented course id is not.
  */
 function sanitise(parsed, eligible) {
-  const courseIds = new Set((eligible.courses ?? []).map((course) => course.id));
-  const topicIds = new Set((eligible.topics ?? []).map((topic) => topic.id));
-  const goalIds = new Set((eligible.goals ?? []).map((goal) => goal.id));
-
-  const keepKnown = (list, allowed, limit) =>
-    (Array.isArray(list) ? list : []).filter((id) => allowed.has(id)).slice(0, limit);
-
-  const availability = (Array.isArray(parsed.availability) ? parsed.availability : [])
-    .map((slot) => ({
-      dayOfWeek: clampInt(slot?.dayOfWeek, 0, 6),
-      startMinute: clampInt(slot?.startMinute, 0, 1439),
-      endMinute: clampInt(slot?.endMinute, 1, 1440),
-      isPreferred: true,
-    }))
-    // An inverted or zero-length interval is a parse error, not a user intent.
-    .filter((slot) => slot.startMinute !== null && slot.endMinute !== null && slot.endMinute > slot.startMinute)
-    .slice(0, 14);
+  const courseResolver = buildResolver(eligible.courses, ["id", "courseCode", "name"]);
+  const topicResolver = buildResolver(eligible.topics, ["id", "name"]);
+  const goalResolver = buildResolver(eligible.goals, ["id", "code", "label"]);
 
   const intent = {
-    courseIds: keepKnown(parsed.courseIds, courseIds, 12),
-    topicIds: keepKnown(parsed.topicIds, topicIds, 12),
-    goalId: goalIds.has(parsed.goalId) ? parsed.goalId : null,
-    availability,
-    preferredMode: ["ONLINE", "PHYSICAL", "EITHER"].includes(parsed.preferredMode) ? parsed.preferredMode : null,
+    courseIds: resolveIdList(parsed.courseIds, courseResolver, 12),
+    topicIds: resolveIdList(parsed.topicIds, topicResolver, 12),
+    goalId: goalResolver(parsed.goalId),
+    availability: normaliseAvailability(parsed.availability),
+    preferredMode: normaliseMode(parsed.preferredMode),
     minGroupSize: clampInt(parsed.minGroupSize, 2, 12),
     maxGroupSize: clampInt(parsed.maxGroupSize, 2, 12),
   };
+
+  // A max below the min is a parse error; widen it rather than return a filter
+  // the ranking engine would treat as impossible.
+  if (intent.minGroupSize && intent.maxGroupSize && intent.maxGroupSize < intent.minGroupSize) {
+    intent.maxGroupSize = intent.minGroupSize;
+  }
 
   // Confidence reflects how much the parser actually extracted. A request that
   // yielded nothing usable is explicitly low confidence, so the UI can fall back
@@ -200,6 +200,144 @@ function sanitise(parsed, eligible) {
   return intent;
 }
 
+/** Loose key: lowercased, punctuation/space stripped so "MATH 101" === "math101". */
+function normaliseKey(value) {
+  return String(value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * Build a `value -> id` resolver from eligible rows, matching on any of the given
+ * keys (id, code, or name). Models frequently echo a course code or a name
+ * instead of the uuid; this recovers those without trusting anything outside the
+ * eligible set.
+ */
+function buildResolver(items, keys) {
+  const map = new Map();
+  for (const item of items ?? []) {
+    for (const key of keys) {
+      const normalised = normaliseKey(item?.[key]);
+      if (normalised && !map.has(normalised)) map.set(normalised, item.id);
+    }
+  }
+  return (value) => map.get(normaliseKey(value)) ?? null;
+}
+
+function resolveIdList(list, resolver, limit) {
+  const out = [];
+  for (const value of Array.isArray(list) ? list : []) {
+    const id = resolver(value);
+    if (id && !out.includes(id)) out.push(id);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+const MODE_SYNONYMS = {
+  ONLINE: "ONLINE",
+  REMOTE: "ONLINE",
+  VIRTUAL: "ONLINE",
+  PHYSICAL: "PHYSICAL",
+  INPERSON: "PHYSICAL",
+  ONSITE: "PHYSICAL",
+  CAMPUS: "PHYSICAL",
+  EITHER: "EITHER",
+  BOTH: "EITHER",
+  ANY: "EITHER",
+  HYBRID: "EITHER",
+};
+
+function normaliseMode(value) {
+  if (typeof value !== "string") return null;
+  return MODE_SYNONYMS[value.toUpperCase().replace(/[^A-Z]/g, "")] ?? null;
+}
+
+const DAY_INDEX = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6,
+};
+
+function normaliseAvailability(raw) {
+  if (Array.isArray(raw)) {
+    return raw
+      .map((slot) => ({
+        dayOfWeek: clampInt(slot?.dayOfWeek, 0, 6),
+        startMinute: coerceMinute(slot?.startMinute, 0, 1439),
+        endMinute: coerceMinute(slot?.endMinute, 1, 1440),
+        isPreferred: true,
+      }))
+      // An inverted or zero-length interval is a parse error, not a user intent.
+      .filter((slot) => slot.dayOfWeek !== null && slot.startMinute !== null && slot.endMinute !== null && slot.endMinute > slot.startMinute)
+      .slice(0, 14);
+  }
+  // Some models answer with a phrase ("Wednesday afternoons") instead of the
+  // structured array the prompt asks for. Recover it rather than drop it.
+  if (typeof raw === "string") return parseAvailabilityText(raw);
+  return [];
+}
+
+function coerceMinute(value, min, max) {
+  if (typeof value === "string" && value.includes(":")) {
+    const [hours, minutes] = value.split(":");
+    const h = Number.parseInt(hours, 10);
+    const m = Number.parseInt(minutes, 10);
+    if (Number.isFinite(h) && Number.isFinite(m)) return Math.min(max, Math.max(min, h * 60 + m));
+  }
+  return clampInt(value, min, max);
+}
+
+/** Recover structured slots from a free-text availability phrase. */
+function parseAvailabilityText(text) {
+  const lower = String(text).toLowerCase();
+
+  const days = [];
+  for (const [name, index] of Object.entries(DAY_INDEX)) {
+    if (lower.includes(name)) days.push(index);
+  }
+  if (lower.includes("weekday")) for (const day of [1, 2, 3, 4, 5]) if (!days.includes(day)) days.push(day);
+  if (!days.length) return [];
+
+  let start = null;
+  let end = null;
+
+  const explicit = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|to|until|till|–)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/.exec(lower);
+  if (explicit) {
+    start = toMinutes(explicit[1], explicit[2], explicit[3]);
+    end = toMinutes(explicit[4], explicit[5], explicit[6]);
+  } else if (lower.includes("morning")) {
+    start = 540;
+    end = 720;
+  } else if (lower.includes("afternoon")) {
+    start = 720;
+    end = 1020;
+  } else if (lower.includes("evening")) {
+    start = 1020;
+    end = 1260;
+  } else if (lower.includes("night")) {
+    start = 1200;
+    end = 1380;
+  }
+
+  if (start === null || end === null || end <= start) return [];
+
+  return days.map((dayOfWeek) => ({ dayOfWeek, startMinute: start, endMinute: end, isPreferred: true }));
+}
+
+function toMinutes(hours, minutes, meridiem) {
+  let h = Number.parseInt(hours, 10);
+  const m = minutes ? Number.parseInt(minutes, 10) : 0;
+  if (!Number.isFinite(h)) return null;
+  if (meridiem === "pm" && h < 12) h += 12;
+  if (meridiem === "am" && h === 12) h = 0;
+  // No meridiem and a small hour is almost always afternoon/evening in this context.
+  if (!meridiem && h < 8) h += 12;
+  return Math.min(1440, Math.max(0, h * 60 + m));
+}
+
 function clampInt(value, min, max) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) return null;
@@ -207,60 +345,31 @@ function clampInt(value, min, max) {
 }
 
 /**
- * Call the configured provider.
+ * Call the configured provider chain.
  *
- * Provider-specific transports live behind this single function so that adding a
- * provider does not mean touching any of the parsing logic above.
+ * Transport selection, failover across the configured target list, and the
+ * per-target circuit breaker all live behind the orchestration module, so this
+ * file only decides the JSON mode.
  */
 async function callProvider(messages) {
-  if (env.AI_PROVIDER === "openai") {
-    return callOpenAiCompatible(messages);
-  }
-  throw new AiUnavailableError(`Unsupported AI provider: ${env.AI_PROVIDER}`);
-}
-
-/** OpenAI-compatible chat completions. Most self-hosted and vendor APIs match. */
-async function callOpenAiCompatible(messages) {
-  // Defaults to the OpenAI endpoint, which every OpenAI-compatible provider
-  // exposes. Overridable for self-hosted gateways.
-  const baseUrl = (env.AI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
-
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${env.AI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: env.AI_CHAT_MODEL,
-      messages,
-      temperature: 0,
-      max_tokens: env.AI_MAX_OUTPUT_TOKENS,
-      // Ask for JSON directly so the response needs no fence stripping in the
-      // common case. `parseJson` still copes if the provider ignores it.
-      response_format: { type: "json_object" },
-    }),
-    signal: AbortSignal.timeout(env.AI_TIMEOUT_MS),
-  });
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`AI provider returned ${response.status}: ${body.slice(0, 200)}`);
-  }
-
-  const payload = await response.json();
-  const content = payload?.choices?.[0]?.message?.content;
-  if (typeof content !== "string") throw new Error("AI provider returned no message content");
-
-  return content;
+  // Intent parsing always wants a JSON object back.
+  return invokeProvider(messages, { jsonMode: true });
 }
 
 /** Whether AI features are usable right now. Surfaced on the health endpoint. */
 export function aiStatus() {
+  const targets = getTargets();
   return {
-    configured: Boolean(env.AI_PROVIDER),
-    provider: env.AI_PROVIDER ?? null,
-    model: env.AI_CHAT_MODEL ?? null,
+    configured: targets.length > 0,
+    provider: targets[0]?.provider ?? null,
+    model: targets[0]?.chatModel ?? null,
+    // Ordered failover chain (primary first). The UI only needs `configured`.
+    chain: targets.map((target) => ({
+      provider: target.provider,
+      model: target.chatModel,
+      label: target.label,
+    })),
+    fallbacks: Math.max(0, targets.length - 1),
     // Honest about the degradation contract: everything except natural-language
     // search and RAG answers works without this.
     required: false,

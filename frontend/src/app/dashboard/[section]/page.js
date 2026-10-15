@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import DashboardWorkspace from "../DashboardWorkspace";
 
-const sections = ["discover", "groups", "workspaces", "messages", "partners", "sessions", "courses", "recommendations", "profile", "notifications"];
+const sections = ["discover", "groups", "workspaces", "messages", "meetings", "partners", "sessions", "courses", "recommendations", "profile", "notifications"];
 
 export function generateStaticParams() {
   return sections.map((section) => ({ section }));

@@ -10,6 +10,7 @@ import {
   groupSizeCompatibility,
   activityCompatibility,
   dataConfidence,
+  preferenceTextSimilarity,
 } from "../lib/features.js";
 import { computeCompatibility, buildExplanation, strengthLabel, calibrate } from "../lib/scoring.js";
 import { DEFAULT_WEIGHTS, MODEL_VERSION, MODEL_METADATA, validateWeights } from "../lib/weights.js";
@@ -252,6 +253,7 @@ async function resolveRequirements(studentId, input) {
       min_group_size: input.minGroupSize ?? profile?.preferences?.min_group_size,
       max_group_size: input.maxGroupSize ?? profile?.preferences?.max_group_size,
       session_minutes: profile?.preferences?.session_minutes,
+      partner_preferences: profile?.preferences?.partner_preferences ?? null,
     },
     programmeId: profile?.programmeId ?? null,
     confidence: dataConfidence({
@@ -302,7 +304,7 @@ async function loadStudentProfile(studentId) {
       "recs:profileAvailability",
     ),
     queryOne(
-      `SELECT preferred_mode, preferred_style, min_group_size, max_group_size, session_minutes
+      `SELECT preferred_mode, preferred_style, min_group_size, max_group_size, session_minutes, partner_preferences
          FROM study_preferences WHERE student_id = $1`,
       [studentId],
       "recs:profilePrefs",
@@ -331,7 +333,7 @@ async function loadStudentProfile(studentId) {
  * you already are is noise, not a feature.
  */
 async function loadGroupCandidates(requirements, input) {
-  const params = [requirements.studentId];
+  const params = [];
   const bind = (value) => {
     params.push(value);
     return `$${params.length}`;
@@ -446,7 +448,7 @@ async function loadGroupCandidates(requirements, input) {
 
 /** Candidate students, respecting discoverability. */
 async function loadStudentCandidates(requirements, input) {
-  const params = [requirements.studentId];
+  const params = [];
   const bind = (value) => {
     params.push(value);
     return `$${params.length}`;
@@ -485,7 +487,7 @@ async function loadStudentCandidates(requirements, input) {
     `SELECT u.id, u.first_name, u.last_name, u.avatar_url,
             sp.university_id, sp.program_id, sp.year_of_study,
             pref.preferred_mode, pref.preferred_style, pref.min_group_size,
-            pref.max_group_size, pref.session_minutes
+            pref.max_group_size, pref.session_minutes, pref.partner_preferences
        FROM users u
        JOIN student_profiles sp ON sp.user_id = u.id
        LEFT JOIN privacy_settings ps ON ps.user_id = u.id
@@ -597,6 +599,10 @@ function scoreCandidate(requirements, candidate, weights, input) {
     availability: availability.score,
     preferences: preferences.score,
     topics: topicSimilarity(requirements.topics, candidate.topics),
+    preferenceText: preferenceTextSimilarity(
+      requirements.preferences.partner_preferences,
+      candidate.partner_preferences,
+    ) ?? undefined,
     groupSize: groupSizeCompatibility(requirements.preferences, candidate.member_count, candidate.max_size),
     activity: candidate.activity_score !== undefined
       ? activityCompatibility(
@@ -630,7 +636,7 @@ function scoreCandidate(requirements, candidate, weights, input) {
     complementaryTopics: complementarity.complementary,
     overlappingTopics: complementarity.overlapping,
     explanation,
-    confidence: result.confidence,
+    confidence: result.confidence / 100,
     candidate,
     payload:
       candidate.name !== undefined
@@ -692,6 +698,10 @@ export async function pairCompatibility(studentIdA, studentIdB) {
     availability: availability.score,
     preferences: preferenceCompatibility(a.preferences, b.preferences).score,
     topics: topicSimilarity(a.topics, b.topics),
+    preferenceText: preferenceTextSimilarity(
+      a.preferences?.partner_preferences,
+      b.preferences?.partner_preferences,
+    ) ?? undefined,
   });
 
   const reasons = buildExplanation(result, {

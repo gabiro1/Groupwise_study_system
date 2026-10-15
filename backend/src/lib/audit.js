@@ -116,8 +116,14 @@ export const AUDIT = Object.freeze({
   PROGRAM_CREATED: "admin.program.created",
   COURSE_CREATED: "admin.course.created",
   COURSE_UPDATED: "admin.course.updated",
+  COURSE_ARCHIVED: "admin.course.archived",
   TOPIC_CREATED: "admin.topic.created",
   TOPIC_UPDATED: "admin.topic.updated",
+  SKILL_CREATED: "admin.skill.created",
+
+  CATALOGUE_REQUEST_CREATED: "catalogue_request.created",
+  CATALOGUE_REQUEST_APPROVED: "admin.catalogue_request.approved",
+  CATALOGUE_REQUEST_DECLINED: "admin.catalogue_request.declined",
 
   REPORT_RESOLVED: "admin.report.resolved",
   REPORT_DISMISSED: "admin.report.dismissed",
@@ -136,8 +142,16 @@ export const AUDIT = Object.freeze({
   GROUP_JOIN_REQUESTED: "group.join_requested",
   GROUP_JOIN_APPROVED: "group.join.approved",
 
+  GROUP_LEADER_ASSIGNED: "admin.group_leader.assigned",
+  GROUP_LEADER_REMOVED: "admin.group_leader.removed",
+  ANNOUNCEMENT_SENT: "admin.announcement.sent",
+  AI_PROVIDER_RESET: "admin.ai.provider.reset",
+
   RESOURCE_DELETED: "resource.deleted",
   MODERATION_MESSAGE_REMOVED: "moderation.message.removed",
+
+  AI_CONVERSATION_CREATED: "ai.conversation.created",
+  AI_MESSAGE_ADDED: "ai.message.added",
 });
 
 export default { recordAudit, AUDIT };

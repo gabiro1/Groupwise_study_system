@@ -103,8 +103,8 @@ export class NotFoundError extends AppError {
 }
 
 export class ConflictError extends AppError {
-  constructor(message = "That action conflicts with the current state of this study group.") {
-    super(message, { status: 409, code: "CONFLICT" });
+  constructor(message = "That action conflicts with the current state of this study group.", options = {}) {
+    super(message, { status: 409, code: "CONFLICT", ...options });
   }
 }
 

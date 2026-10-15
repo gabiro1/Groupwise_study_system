@@ -126,12 +126,16 @@ export function requireRole(...allowedRoles) {
   };
 }
 
-export const requireStudent = requireRole("STUDENT");
-export const requireLecturer = requireRole("LECTURER");
+/**
+ * A "student" in the product sense: a plain student or a group leader. Leading a
+ * group is an additional responsibility layered on a student account, so a group
+ * leader keeps every student capability.
+ */
+export const requireStudent = requireRole("STUDENT", "GROUP_LEADER");
 export const requireAdmin = requireRole("ADMIN");
 
-/** Lecturer or ADMIN — both may see aggregated academic views. */
-export const requireStaff = requireRole("LECTURER", "ADMIN");
+/** Staff = administrators. Group leaders are students with extra group duties. */
+export const requireStaff = requireRole("ADMIN");
 
 /**
  * Require a verified email address. Used for actions where an unverified
@@ -149,7 +153,6 @@ export default {
   optionalAuth,
   requireRole,
   requireStudent,
-  requireLecturer,
   requireAdmin,
   requireStaff,
   requireVerifiedEmail,

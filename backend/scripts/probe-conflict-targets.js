@@ -7,7 +7,7 @@ const TABLES = [
   "roles", "universities", "faculties", "departments", "programs", "courses",
   "course_topics", "skills", "learning_goals", "system_settings",
   "student_profiles", "privacy_settings", "student_skills", "student_topics",
-  "student_learning_goals", "student_courses", "lecturer_courses",
+  "student_learning_goals", "student_courses",
   "study_groups", "study_group_members", "workspaces", "group_membership_outcomes",
   "recommendation_model_versions",
 ];

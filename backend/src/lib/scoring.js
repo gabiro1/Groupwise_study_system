@@ -35,6 +35,7 @@ const pct = (value) => Math.round(clamp01(value) * 1000) / 10;
  * @property {number} [activity]        Group activity alignment         [0,1]
  * @property {number} [groupSize]       Group-size fit                   [0,1]
  * @property {number} [feedback]        Historical feedback signal       [0,1]
+ * @property {number} [preferenceText]  Free-text preference agreement   [0,1]
  * @property {number} [confidence]      Input data quality               [0,1]
  * @property {object} [weights]
  * @property {object} [config]
@@ -72,6 +73,7 @@ export function computeCompatibility(input) {
     activity: Number.isFinite(input.activity) ? clamp01(input.activity) : null,
     groupSize: Number.isFinite(input.groupSize) ? clamp01(input.groupSize) : null,
     feedback: Number.isFinite(input.feedback) ? clamp01(input.feedback) : null,
+    preferenceText: Number.isFinite(input.preferenceText) ? clamp01(input.preferenceText) : null,
   };
 
   // ---- Weighted base -------------------------------------------------------
