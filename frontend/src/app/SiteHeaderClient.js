@@ -30,24 +30,39 @@ export default function SiteHeaderClient({ pages }) {
 
   useEffect(() => {
     let active = true;
-    fetch("/api/auth/me", { cache: "no-store" })
-      .then(async (response) => {
-        if (response.status === 401) return { status: "unauthenticated", user: null };
-        if (!response.ok) throw new Error("Could not verify the current session.");
-        const result = await response.json();
-        const currentUser = result.data?.user || null;
-        return {
-          status: currentUser ? "authenticated" : "unauthenticated",
-          user: currentUser,
-        };
-      })
-      .then(({ status, user: currentUser }) => {
-        if (active) setAuthState({ pathname, status, user: currentUser });
-      })
-      .catch(() => {
-        if (active) setAuthState({ pathname, status: "error", user: null });
-      });
-    return () => { active = false; };
+    const controller = new AbortController();
+
+    async function loadAccount() {
+      const maxAttempts = 3;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          const response = await fetch("/api/auth/me", { cache: "no-store", signal: controller.signal });
+          if (response.status === 401) return { status: "unauthenticated", user: null };
+          if (!response.ok) throw new Error("Could not verify the current session.");
+          const result = await response.json();
+          const currentUser = result.data?.user || null;
+          return {
+            status: currentUser ? "authenticated" : "unauthenticated",
+            user: currentUser,
+          };
+        } catch {
+          if (controller.signal.aborted) return null;
+          if (attempt === maxAttempts) break;
+          await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+          if (controller.signal.aborted) return null;
+        }
+      }
+      return { status: "error", user: null };
+    }
+
+    loadAccount().then((next) => {
+      if (active && next) setAuthState({ pathname, status: next.status, user: next.user });
+    });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, [pathname]);
 
   const authStatus = authState.pathname === pathname ? authState.status : "loading";
@@ -144,7 +159,7 @@ export default function SiteHeaderClient({ pages }) {
             </div>
           </div>
           {authStatus === "authenticated" && <Link className="landing-mobile-dashboard" href="/dashboard" onClick={() => setMobileOpen(false)}>Your dashboard</Link>}
-          {authStatus === "unauthenticated" && (
+          {(authStatus === "unauthenticated" || authStatus === "error") && (
             <div className="landing-mobile-auth">
               <Link href="/login" onClick={() => setMobileOpen(false)}>Sign in</Link>
               <Link className="landing-mobile-signup" href="/register" onClick={() => setMobileOpen(false)}>Create account <span aria-hidden="true">↗</span></Link>
@@ -185,15 +200,13 @@ export default function SiteHeaderClient({ pages }) {
                 </div>
               )}
             </div>
-          ) : authStatus === "unauthenticated" ? (
+          ) : authStatus === "unauthenticated" || authStatus === "error" ? (
             <>
               <Link className="landing-sign-in" href="/login">Sign in</Link>
               <Link className="landing-nav-cta landing-desktop-signup" href="/register">Create account <span aria-hidden="true">↗</span></Link>
             </>
           ) : (
-            <span className="site-auth-status" role="status">
-              {authStatus === "loading" ? "Checking account…" : "Account status unavailable"}
-            </span>
+            <span className="site-auth-status" role="status">Checking account…</span>
           )}
         </div>
       </div>
