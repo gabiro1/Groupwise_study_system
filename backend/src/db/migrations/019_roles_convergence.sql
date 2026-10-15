@@ -12,6 +12,10 @@
 -- text, the type is recreated without LECTURER (and with GROUP_LEADER), and the
 -- columns are cast back. All LECTURER data is normalised BEFORE the cast so the
 -- rebuild can never fail on a stray value.
+--
+-- Column defaults are typed `user_role` too (`'STUDENT'::user_role`), and those
+-- defaults keep a dependency on the type that survives the switch to text.
+-- They are therefore dropped before the type is rebuilt and restored after.
 
 -- ---------------------------------------------------------------------------
 -- 1. Normalise data that referenced the retired role.
@@ -22,13 +26,17 @@ UPDATE users
    SET role_id = (SELECT id FROM roles WHERE key = 'STUDENT')
  WHERE role_id = (SELECT id FROM roles WHERE key = 'LECTURER');
 
--- Lecturer-authored groups/workspaces and audit rows fall back to STUDENT/ADMIN.
+-- Lecturer-authored groups/resources and audit rows fall back to STUDENT/ADMIN.
 UPDATE study_groups SET created_by_role = 'STUDENT' WHERE created_by_role = 'LECTURER';
-UPDATE workspaces   SET uploaded_by_role = 'STUDENT' WHERE uploaded_by_role = 'LECTURER';
+UPDATE resources    SET uploaded_by_role = 'STUDENT' WHERE uploaded_by_role = 'LECTURER';
 UPDATE audit_logs   SET actor_role = 'ADMIN' WHERE actor_role = 'LECTURER';
 
 -- The lecturer assignment table is retired entirely.
 DROP TABLE IF EXISTS lecturer_courses CASCADE;
+
+-- The retired role must leave the catalogue BEFORE the enum is rebuilt: the
+-- `key` column is re-cast to the new enum, which no longer knows LECTURER.
+DELETE FROM roles WHERE key = 'LECTURER';
 
 -- Joined-via and topic-source CHECKs that named LECTURER-related values.
 UPDATE study_group_members SET joined_via = 'DIRECT' WHERE joined_via = 'LECTURER_ASSIGNED';
@@ -50,8 +58,12 @@ ALTER TABLE student_topics
 
 ALTER TABLE roles          ALTER COLUMN key             TYPE text;
 ALTER TABLE study_groups   ALTER COLUMN created_by_role  TYPE text;
-ALTER TABLE workspaces     ALTER COLUMN uploaded_by_role TYPE text;
+ALTER TABLE resources      ALTER COLUMN uploaded_by_role TYPE text;
 ALTER TABLE audit_logs     ALTER COLUMN actor_role       TYPE text;
+
+-- The enum-typed defaults would keep the old type alive and block the drop.
+ALTER TABLE study_groups   ALTER COLUMN created_by_role  DROP DEFAULT;
+ALTER TABLE resources      ALTER COLUMN uploaded_by_role DROP DEFAULT;
 
 DROP TYPE user_role;
 
@@ -59,14 +71,15 @@ CREATE TYPE user_role AS ENUM ('STUDENT', 'GROUP_LEADER', 'ADMIN');
 
 ALTER TABLE roles          ALTER COLUMN key             TYPE user_role USING key::user_role;
 ALTER TABLE study_groups   ALTER COLUMN created_by_role  TYPE user_role USING created_by_role::user_role;
-ALTER TABLE workspaces     ALTER COLUMN uploaded_by_role TYPE user_role USING uploaded_by_role::user_role;
+ALTER TABLE resources      ALTER COLUMN uploaded_by_role TYPE user_role USING uploaded_by_role::user_role;
 ALTER TABLE audit_logs     ALTER COLUMN actor_role       TYPE user_role USING actor_role::user_role;
+
+ALTER TABLE study_groups   ALTER COLUMN created_by_role  SET DEFAULT 'STUDENT';
+ALTER TABLE resources      ALTER COLUMN uploaded_by_role SET DEFAULT 'STUDENT';
 
 -- ---------------------------------------------------------------------------
 -- 3. Reset the role catalogue and backfill GROUP_LEADER from memberships.
 -- ---------------------------------------------------------------------------
-
-DELETE FROM roles WHERE key = 'LECTURER';
 
 INSERT INTO roles (key, label, description)
 VALUES ('GROUP_LEADER', 'Group Leader', 'Leads one or more study groups and manages their members.')
