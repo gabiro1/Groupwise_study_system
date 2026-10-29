@@ -11,6 +11,9 @@
  */
 
 const LOCAL_BACKEND_URL = "http://localhost:4000";
+// Production fallback. Deployments can still override it with BACKEND_API_URL
+// (for example a staging service or a custom backend domain).
+const PRODUCTION_BACKEND_URL = "https://groupwise-study-system.onrender.com";
 
 export class BackendConfigurationError extends Error {
   constructor(message) {
@@ -49,22 +52,16 @@ export function normalizeBackendUrl(value) {
 /**
  * Resolve the backend base URL.
  *
- * Outside production a missing value falls back to the local server, which is
- * convenient for `next dev`. In production a missing value is a configuration
- * error: silently proxying to localhost produces confusing 503s and hides the
- * actual deployment mistake.
+ * `BACKEND_API_URL` always wins when set. Outside production a missing value
+ * falls back to the local server, which is convenient for `next dev`. In
+ * production it falls back to the deployed Render service so a forgotten
+ * environment variable does not take the whole app down.
  */
 export function getBackendBaseUrl() {
   const configured = process.env.BACKEND_API_URL;
   if (configured && configured.trim()) return normalizeBackendUrl(configured);
 
-  if (process.env.NODE_ENV === "production") {
-    throw new BackendConfigurationError(
-      "BACKEND_API_URL is not set. Configure it in the deployment environment.",
-    );
-  }
-
-  return LOCAL_BACKEND_URL;
+  return process.env.NODE_ENV === "production" ? PRODUCTION_BACKEND_URL : LOCAL_BACKEND_URL;
 }
 
 /** Build a URL under the backend's `/api` namespace. */

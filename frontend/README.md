@@ -69,11 +69,11 @@ Add one environment variable for **Production** (and Preview if you use it):
 BACKEND_API_URL=https://<your-render-service>.onrender.com
 ```
 
-Do not add `/api` to the end, and do not prefix the name with `NEXT_PUBLIC_`.
-Vercel only injects environment variables at build/runtime, so redeploy after
-adding or changing it. If `BACKEND_API_URL` is missing in production, API
-requests return `503 BACKEND_NOT_CONFIGURED` instead of silently calling
-`localhost`.
+This is optional: when unset in production, the frontend falls back to
+`https://groupwise-study-system.onrender.com`. Set it explicitly to override
+that fallback for staging or a custom backend domain. Do not add `/api` to the
+end, and do not prefix the name with `NEXT_PUBLIC_`. Vercel only injects
+environment variables at build/runtime, so redeploy after changing it.
 
 On the Render backend, set `APP_URL` to the Vercel URL, `COOKIE_SECURE=true`,
 `TRUST_PROXY=true`, and `CORS_ORIGINS` to the exact Vercel origin (plus any

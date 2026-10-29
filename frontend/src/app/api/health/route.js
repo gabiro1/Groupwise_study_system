@@ -28,7 +28,7 @@ export async function GET() {
           reachable: false,
           configured: false,
           error: error instanceof BackendConfigurationError
-            ? "BACKEND_API_URL is missing or invalid on this deployment."
+            ? "BACKEND_API_URL is invalid on this deployment."
             : "The backend configuration is invalid.",
         },
         timestamp: new Date().toISOString(),
