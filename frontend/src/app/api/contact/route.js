@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
-
-const backendUrl = (process.env.BACKEND_API_URL || "http://localhost:4000").replace(/\/+$/, "");
+import {
+  BackendConfigurationError,
+  backendApiUrl,
+  backendConfigurationResponse,
+} from "../../../lib/backend-api";
 
 async function forward(request, method) {
   const cookie = request.headers.get("cookie") || "";
@@ -18,13 +21,16 @@ async function forward(request, method) {
 
   let upstream;
   try {
-    upstream = await fetch(`${backendUrl}/api/contact`, {
+    upstream = await fetch(backendApiUrl("contact"), {
       method,
       headers,
       body: method === "POST" ? await request.text() : undefined,
       cache: "no-store",
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof BackendConfigurationError) {
+      return NextResponse.json(backendConfigurationResponse(error), { status: 503 });
+    }
     return NextResponse.json(
       { error: { message: "We couldn’t reach the message service. Please try again later." } },
       { status: 503 },

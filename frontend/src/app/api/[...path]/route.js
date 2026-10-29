@@ -1,9 +1,14 @@
 import { NextResponse } from "next/server";
 import { forwardSetCookies } from "../cookies";
 import { applySetCookies, refreshSession } from "../session/refresh-session";
+import { backendApiUrl, backendConfigurationResponse } from "../../../lib/backend-api";
 
-const backendUrl = (process.env.BACKEND_API_URL || "http://localhost:4000").replace(/\/+$/, "");
 const allowedMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+
+// A sleeping Render instance can take tens of seconds to wake. Give the proxy
+// enough time to wait instead of failing the first request with a gateway
+// timeout. Vercel caps this at the plan's maximum.
+export const maxDuration = 60;
 
 function cookieValue(cookieHeader, name) {
   const value = cookieHeader
@@ -46,7 +51,14 @@ async function forward(request, context) {
   const cookie = request.headers.get("cookie") || "";
   const csrfToken = cookieValue(cookie, "lien_csrf");
   const body = ["POST", "PUT", "PATCH", "DELETE"].includes(method) ? await request.text() : undefined;
-  const apiUrl = `${backendUrl}/api/${path.join("/")}${request.nextUrl.search}`;
+  let apiUrl;
+
+  try {
+    apiUrl = backendApiUrl(path.join("/"), request.nextUrl.search);
+  } catch (error) {
+    return NextResponse.json(backendConfigurationResponse(error), { status: 503 });
+  }
+
   let result;
 
   try {
