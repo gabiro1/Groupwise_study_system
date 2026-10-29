@@ -94,6 +94,50 @@ const schema = z.object({
   SEED_DEMO_DATA: z.enum(["true", "false"]).default("false"),
 });
 
+/**
+ * Normalise the CORS allowlist.
+ *
+ * Browsers compare origins exactly, so `https://app.example.com/` and
+ * `https://app.example.com` must resolve to the same entry. Paths are rejected
+ * because an Origin header never contains one. A wildcard is always refused:
+ * combined with credentials it is unsafe, and the allowlist is small enough to
+ * spell out.
+ */
+function normalizeOrigins(value, { production }) {
+  const origins = [];
+
+  for (const entry of value.split(",")) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+
+    if (trimmed === "*") {
+      throw new Error("wildcard origins are not allowed; list each frontend origin explicitly.");
+    }
+
+    let url;
+    try {
+      url = new URL(trimmed);
+    } catch {
+      throw new Error(`"${trimmed}" is not a valid URL.`);
+    }
+
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new Error(`"${trimmed}" must use http or https.`);
+    }
+    if (url.pathname !== "/" || url.search || url.hash) {
+      throw new Error(`"${trimmed}" must be an origin only (for example https://app.example.com).`);
+    }
+
+    origins.push(url.origin);
+  }
+
+  if (!origins.length && production) {
+    throw new Error("at least one frontend origin is required in production.");
+  }
+
+  return [...new Set(origins)];
+}
+
 const parsed = schema.safeParse(process.env);
 
 if (!parsed.success) {
@@ -106,6 +150,15 @@ if (!parsed.success) {
 }
 
 const raw = parsed.data;
+
+let corsOrigins;
+try {
+  corsOrigins = normalizeOrigins(raw.CORS_ORIGINS, { production: raw.NODE_ENV === "production" });
+} catch (error) {
+  // eslint-disable-next-line no-console
+  console.error(`\nInvalid environment configuration:\n  - CORS_ORIGINS: ${error.message}\n`);
+  process.exit(1);
+}
 
 /** Count models in the optional AI_FALLBACKS JSON, tolerating malformed input. */
 function countAiFallbackModels(value) {
@@ -129,9 +182,7 @@ export const env = Object.freeze({
   ...raw,
   isProduction: raw.NODE_ENV === "production",
   isTest: raw.NODE_ENV === "test",
-  corsOrigins: raw.CORS_ORIGINS.split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean),
+  corsOrigins,
   databaseSsl: raw.DATABASE_SSL === "true",
   databaseSslRejectUnauthorized: raw.DATABASE_SSL_REJECT_UNAUTHORIZED === "true",
   trustProxy: raw.TRUST_PROXY === "true",

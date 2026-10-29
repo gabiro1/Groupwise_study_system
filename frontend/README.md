@@ -28,8 +28,17 @@ pages support plans, tasks, sessions, group chat, link/text resources, learning
 progress, group feedback, and an AI assistant grounded in accessible group
 material. File uploads are not available in group workspaces yet.
 
+## Backend connection
+
 The dashboard and its API proxy require the Lien backend. Set
-`BACKEND_API_URL` when the backend is not running at `http://localhost:4000`.
+`BACKEND_API_URL` when the backend is not running at `http://localhost:4000`
+(see `.env.example`). This is a **server-only** variable: the browser calls
+same-origin `/api/*`, and the Next.js route handlers proxy to the backend, so
+no `NEXT_PUBLIC_*` or `VITE_*` variable is involved.
+
+Check the connection from the app itself with `GET /api/health`; it reports
+whether the Next.js server can reach the backend and database.
+
 Workspace links use `/dashboard/workspaces/[workspaceId]`.
 
 ## Learn More
@@ -43,6 +52,32 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 
 ## Deploy on Vercel
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+This repository contains two apps. Create the Vercel project from the repo
+root, then use these settings:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+| Setting | Value |
+| --- | --- |
+| Root Directory | `frontend` |
+| Framework Preset | Next.js |
+| Install Command | `npm install` |
+| Build Command | `npm run build` |
+| Output Directory | *(leave default)* |
+
+Add one environment variable for **Production** (and Preview if you use it):
+
+```
+BACKEND_API_URL=https://<your-render-service>.onrender.com
+```
+
+Do not add `/api` to the end, and do not prefix the name with `NEXT_PUBLIC_`.
+Vercel only injects environment variables at build/runtime, so redeploy after
+adding or changing it. If `BACKEND_API_URL` is missing in production, API
+requests return `503 BACKEND_NOT_CONFIGURED` instead of silently calling
+`localhost`.
+
+On the Render backend, set `APP_URL` to the Vercel URL, `COOKIE_SECURE=true`,
+`TRUST_PROXY=true`, and `CORS_ORIGINS` to the exact Vercel origin (plus any
+custom domain). `COOKIE_DOMAIN` must stay unset when the frontend and backend
+are on different domains and all browser traffic goes through the BFF.
+
+Check out the [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for details.
