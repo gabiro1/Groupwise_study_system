@@ -4,6 +4,53 @@ import { createApp } from "./config/app.js";
 import { healthcheck, closePool } from "./config/db.js";
 import { runMigrations } from "./db/migrate.js";
 import { initRealtime } from "./lib/realtime.js";
+import { publishDueAnnouncements } from "./services/announcement.service.js";
+
+/**
+ * How often the announcement scheduler looks for due rows.
+ *
+ * A scheduled announcement is claimed with a conditional UPDATE (`status =
+ * 'SCHEDULED'`), so several API instances can run this tick concurrently without
+ * delivering the same announcement twice.
+ */
+const ANNOUNCEMENT_TICK_MS = 60_000;
+
+/**
+ * Start the in-process announcement scheduler.
+ *
+ * Returns a stop function so graceful shutdown can clear the timer. The timer is
+ * `unref`'d so it never keeps the process alive on its own.
+ */
+function startAnnouncementScheduler() {
+  let running = false;
+
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const published = await publishDueAnnouncements();
+      if (published > 0) logger.info("Published scheduled announcements", { count: published });
+    } catch (error) {
+      // A failed tick is retried on the next interval; it must not crash the API.
+      logger.error("Announcement scheduler tick failed", { message: error.message });
+    } finally {
+      running = false;
+    }
+  };
+
+  const timer = setInterval(tick, ANNOUNCEMENT_TICK_MS);
+  timer.unref();
+
+  // Run once shortly after boot so a restart does not delay a due announcement
+  // by a full interval.
+  const initial = setTimeout(tick, 5_000);
+  initial.unref();
+
+  return () => {
+    clearInterval(timer);
+    clearTimeout(initial);
+  };
+}
 
 /**
  * Server bootstrap.
@@ -69,6 +116,10 @@ async function start() {
   server.keepAliveTimeout = 65_000;
   server.headersTimeout = 66_000;
 
+  // Scheduled announcements are delivered by this process, reusing the existing
+  // notification pipeline.
+  const stopAnnouncementScheduler = startAnnouncementScheduler();
+
   // ---- Graceful shutdown --------------------------------------------------
   let shuttingDown = false;
 
@@ -76,6 +127,8 @@ async function start() {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info("Shutting down", { signal });
+
+    stopAnnouncementScheduler();
 
     // Stop accepting new connections, then drain in-flight ones.
     const forced = setTimeout(() => {

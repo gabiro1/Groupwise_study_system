@@ -17,6 +17,7 @@ const schema = z.object({
 
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   DATABASE_POOL_MAX: z.coerce.number().int().positive().max(50).default(10),
+  DATABASE_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   DATABASE_SSL: z.enum(["true", "false"]).default("false"),
   DATABASE_SSL_REJECT_UNAUTHORIZED: z.enum(["true", "false"]).default("false"),
   DATABASE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),

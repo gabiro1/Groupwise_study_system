@@ -7,6 +7,7 @@ import logger from "./logger.js";
 import { requestContext, errorHandler, notFoundHandler } from "../middleware/errorHandler.js";
 import { csrfProtection } from "../middleware/csrf.js";
 import { globalLimiter } from "../middleware/rateLimit.js";
+import { maintenanceGuard } from "../middleware/maintenance.js";
 import { healthcheck, poolStats } from "./db.js";
 import { ForbiddenError } from "../lib/errors.js";
 
@@ -23,6 +24,7 @@ import aiRoutes from "../routes/ai.routes.js";
 import notificationsRoutes from "../routes/notifications.routes.js";
 import adminRoutes, { reportRouter } from "../routes/admin.routes.js";
 import adminManagementRoutes from "../routes/adminManagement.routes.js";
+import adminConsoleRoutes from "../routes/adminConsole.routes.js";
 import researchRoutes from "../routes/research.routes.js";
 import contactRoutes from "../routes/contact.routes.js";
 
@@ -117,6 +119,10 @@ export function createApp() {
   // ---- Request context & global limit -------------------------------------
   app.use(requestContext);
   app.use(globalLimiter);
+  // Maintenance gate: after context/limits so blocked requests are still logged
+  // and rate-limited, before CSRF so a maintenance POST returns 503 rather than
+  // a confusing 403.
+  app.use(maintenanceGuard);
 
   // ---- Operational endpoints ---------------------------------------------
   // Registered before CSRF since they are unauthenticated GETs.
@@ -160,6 +166,10 @@ export function createApp() {
   app.use("/api/recommendations", recommendationsRoutes);
   app.use("/api/ai", aiRoutes);
   app.use("/api/notifications", notificationsRoutes);
+  // The administrative console extends the existing admin surface. It is
+  // mounted first so its specific child paths resolve before the older routers,
+  // which intentionally keep their original list/moderation endpoints.
+  app.use("/api/admin", adminConsoleRoutes);
   // The management surface (group leaders, workspaces, sessions, analytics, AI
   // config, announcements) is mounted first so its specific paths resolve before
   // the older admin router's catch-alls.

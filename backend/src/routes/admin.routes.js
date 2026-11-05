@@ -6,7 +6,8 @@ import { writeLimiter, searchLimiter } from "../middleware/rateLimit.js";
 import { query, queryRows, queryOne, withTransaction, healthcheck } from "../config/db.js";
 import env from "../config/env.js";
 import { NotFoundError, ConflictError, AppError, ForbiddenError } from "../lib/errors.js";
-import { recordAudit, AUDIT } from "../lib/audit.js";
+import { recordAudit, AUDIT, sanitiseMetadata } from "../lib/audit.js";
+import { assertReportActionTarget, assertReportResolution } from "../lib/reportModeration.js";
 import {
   adminUserQuerySchema,
   changeRoleSchema,
@@ -112,40 +113,133 @@ reportRouter.post(
   }),
 );
 
-/** Confirm the target exists and, for a student, that the reporter may see them. */
+/**
+ * Confirm that the reporter can see the target through the same membership and
+ * privacy boundaries as the product itself. An inaccessible row is deliberately
+ * returned as non-existent so report submission cannot be used as an oracle.
+ */
 async function resolveReportTarget(reporterId, targetType, targetId) {
-  const table = {
-    STUDENT: "users",
-    GROUP: "study_groups",
-    MESSAGE: "messages",
-    RESOURCE: "resources",
-  }[targetType];
+  if (targetType === "STUDENT") {
+    const row = await queryOne(
+      "SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL",
+      [targetId],
+      "admin:reportStudentTarget",
+    );
+    if (!row) return { exists: false };
 
-  const where = {
-    STUDENT: "deleted_at IS NULL",
-    GROUP: "TRUE",
-    MESSAGE: "deleted_at IS NULL",
-    RESOURCE: "is_deleted = FALSE",
-  }[targetType];
-
-  const row = await queryOne(`SELECT 1 FROM ${table} WHERE id = $1 AND ${where}`, [targetId], "admin:reportTarget");
-
-  if (!row) return { exists: false };
-
-  if (targetType !== "STUDENT") return { exists: true };
-
-  // A student is only reportable by someone who could otherwise see them. The
-  // profile loader already applies every visibility rule, so reusing it means the
-  // reporting path cannot drift from the browsing path — the same 404 for both.
-  const { getStudentProfile } = await import("../services/discovery.service.js");
-
-  try {
-    // `viewerId` is the reporter, so this evaluates exactly what they can see.
-    await getStudentProfile(reporterId, targetId);
-    return { exists: true, visible: true };
-  } catch {
-    return { exists: true, visible: false };
+    // A student is only reportable by someone who could otherwise see them. The
+    // profile loader already applies every visibility rule, so reusing it means
+    // the reporting path cannot drift from the browsing path.
+    const { getStudentProfile } = await import("../services/discovery.service.js");
+    try {
+      await getStudentProfile(reporterId, targetId);
+      return { exists: true, visible: true };
+    } catch (error) {
+      if (error instanceof NotFoundError || error.status === 404) return { exists: false };
+      throw error;
+    }
   }
+
+  if (targetType === "GROUP") {
+    const row = await queryOne(
+      `SELECT 1
+         FROM study_groups g
+        WHERE g.id = $1
+          AND g.status = 'ACTIVE'
+          AND (
+            g.privacy IN ('PUBLIC', 'REQUEST_REQUIRED')
+            OR EXISTS (
+              SELECT 1 FROM study_group_members m
+               WHERE m.group_id = g.id AND m.student_id = $2
+                 AND m.left_at IS NULL AND m.status = 'ACTIVE'
+            )
+          )`,
+      [targetId, reporterId],
+      "admin:reportGroupTarget",
+    );
+    return { exists: Boolean(row) };
+  }
+
+  if (targetType === "MESSAGE") {
+    // Both workspace/session messages and direct messages use the public report
+    // target vocabulary. The access predicates intentionally return no row for
+    // a conversation the reporter cannot read.
+    const row = await queryOne(
+      `SELECT m.id, 'WORKSPACE' AS source
+         FROM messages m
+         LEFT JOIN study_sessions ss ON ss.id = m.session_id
+         JOIN workspaces w ON w.id = COALESCE(m.workspace_id, ss.workspace_id)
+         JOIN workspace_groups wg ON wg.workspace_id = w.id
+         JOIN study_groups g ON g.id = wg.group_id AND g.status = 'ACTIVE'
+        WHERE m.id = $1 AND m.deleted_at IS NULL AND w.is_archived = FALSE AND g.status = 'ACTIVE'
+          AND EXISTS (
+            SELECT 1 FROM study_group_members gm
+             WHERE gm.group_id = g.id AND gm.student_id = $2
+               AND gm.left_at IS NULL AND gm.status = 'ACTIVE'
+          )
+          AND (
+            m.session_id IS NULL
+            OR ss.participants_closed = FALSE
+            OR EXISTS (
+              SELECT 1 FROM session_participants sp
+               WHERE sp.session_id = ss.id AND sp.student_id = $2
+            )
+            OR EXISTS (
+              SELECT 1 FROM study_group_members gm
+               WHERE gm.group_id = g.id AND gm.student_id = $2
+                 AND gm.left_at IS NULL AND gm.status = 'ACTIVE'
+                 AND gm.role IN ('OWNER', 'MODERATOR')
+            )
+          )
+       UNION ALL
+       SELECT dm.id, 'DIRECT' AS source
+         FROM direct_messages dm
+         JOIN direct_conversation_members cm ON cm.conversation_id = dm.conversation_id
+        WHERE dm.id = $1 AND dm.deleted_at IS NULL AND cm.user_id = $2
+        LIMIT 1`,
+      [targetId, reporterId],
+      "admin:reportMessageTarget",
+    );
+    return { exists: Boolean(row), source: row?.source };
+  }
+
+  if (targetType === "RESOURCE") {
+    const row = await queryOne(
+      `SELECT 1
+         FROM resources r
+         LEFT JOIN workspaces w ON w.id = r.workspace_id
+        WHERE r.id = $1 AND r.is_deleted = FALSE
+          AND (
+            (
+               r.workspace_id IS NOT NULL
+               AND w.is_archived = FALSE
+               AND EXISTS (
+                SELECT 1
+                  FROM workspace_groups wg
+                  JOIN study_groups g ON g.id = wg.group_id AND g.status = 'ACTIVE'
+                  JOIN study_group_members m ON m.group_id = g.id
+                 WHERE wg.workspace_id = r.workspace_id AND m.student_id = $2
+                   AND m.left_at IS NULL AND m.status = 'ACTIVE'
+              )
+              AND (r.visibility <> 'PRIVATE' OR r.uploaded_by = $2)
+            )
+             OR (
+               r.workspace_id IS NULL
+               AND r.course_id IS NOT NULL
+                AND EXISTS (
+                  SELECT 1 FROM student_courses sc
+                  WHERE sc.course_id = r.course_id AND sc.student_id = $2 AND sc.is_active
+               )
+              AND (r.visibility <> 'PRIVATE' OR r.uploaded_by = $2)
+            )
+          )`,
+      [targetId, reporterId],
+      "admin:reportResourceTarget",
+    );
+    return { exists: Boolean(row) };
+  }
+
+  return { exists: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +259,7 @@ router.get(
   validate({ query: adminUserQuerySchema }),
   asyncHandler(async (req, res) => {
     const filters = req.query;
+    const offset = filters.cursor ?? 0;
     const params = [];
     const bind = (value) => {
       params.push(value);
@@ -192,13 +287,13 @@ router.get(
               u.email_verified_at, u.last_login_at, u.created_at, u.suspended_at, u.suspension_reason,
               sp.onboarding_step, sp.onboarding_done, sp.university_id,
               (SELECT count(*)::int FROM study_group_members m
-                WHERE m.student_id = u.id AND m.left_at IS NULL) AS group_count
+                 WHERE m.student_id = u.id AND m.left_at IS NULL AND m.status = 'ACTIVE') AS group_count
          FROM users u
          JOIN roles r ON r.id = u.role_id
          LEFT JOIN student_profiles sp ON sp.user_id = u.id
         WHERE ${clauses.join(" AND ")}
         ORDER BY u.created_at DESC
-        LIMIT ${bind(filters.limit)} OFFSET ${bind(filters.cursor ?? 0)}`,
+        LIMIT ${bind(filters.limit)} OFFSET ${bind(offset)}`,
       params,
       "admin:listUsers",
     );
@@ -208,7 +303,7 @@ router.get(
       // Cursor is an offset here for simplicity. Correctness over cleverness: the
       // list is administrative and rarely deep enough for keyset paging to pay
       // for its complexity.
-      cursor: Number(filters.cursor ?? 0) + rows.length < filters.limit ? Number(filters.cursor ?? 0) + rows.length : null,
+      cursor: rows.length === filters.limit ? offset + rows.length : null,
     });
   }),
 );
@@ -283,7 +378,7 @@ router.post(
 
       // Sessions are revoked so a privilege change takes effect immediately
       // rather than at the user's next login.
-      await tx.query(
+      const sessions = await tx.query(
         "UPDATE auth_sessions SET revoked_at = now(), revoked_reason = 'role_change' WHERE user_id = $1 AND revoked_at IS NULL",
         [userId],
         "admin:revokeOnRoleChange",
@@ -296,15 +391,15 @@ router.post(
           action: AUDIT.ROLE_CHANGED,
           entityType: "user",
           entityId: userId,
-          metadata: { from: target.role, to: role, reason: reason ?? null },
+          metadata: { from: target.role, to: role, reason: reason ?? null, sessionsRevoked: sessions.rowCount ?? 0 },
         },
         { tx },
       );
 
-      return user;
+      return { user, sessionsRevoked: sessions.rowCount ?? 0 };
     }, "admin:changeRole");
 
-    return ok(res, { user: updated, previousRole: target.role, sessionsRevoked: true });
+    return ok(res, { ...updated, previousRole: target.role });
   }),
 );
 
@@ -320,30 +415,29 @@ router.post(
   writeLimiter,
   validate({ body: suspendUserSchema }),
   asyncHandler(async (req, res) => {
-    const { userId, reason, suspendSessions } = req.body;
+    const { userId, reason } = req.body;
 
     if (userId === req.user.id) {
       throw new AppError("You cannot suspend your own account.", { status: 422, code: "SELF_SUSPEND" });
     }
 
-    const target = await queryOne(
-      `SELECT u.id, u.email, u.status, r.key AS role FROM users u JOIN roles r ON r.id = u.role_id
-        WHERE u.id = $1 AND u.deleted_at IS NULL`,
-      [userId],
-      "admin:loadSuspendTarget",
-    );
-
-    if (!target) throw new NotFoundError("That user");
-
-    if (target.role === "ADMIN") {
-      throw new ForbiddenError("Use a two-admin process to suspend another administrator.");
-    }
-
-    if (target.status === "SUSPENDED") {
-      throw new ConflictError("That account is already suspended.");
-    }
-
     const suspended = await withTransaction(async (tx) => {
+      const target = await tx.queryOne(
+        `SELECT u.id, u.email, u.status, r.key AS role
+           FROM users u JOIN roles r ON r.id = u.role_id
+          WHERE u.id = $1 AND u.deleted_at IS NULL
+          FOR UPDATE OF u`,
+        [userId],
+        "admin:loadSuspendTarget",
+      );
+      if (!target) throw new NotFoundError("That user");
+      if (target.role === "ADMIN") {
+        throw new ForbiddenError("Use a two-admin process to suspend another administrator.");
+      }
+      if (target.status === "SUSPENDED") {
+        throw new ConflictError("That account is already suspended.");
+      }
+
       const user = await tx.queryOne(
         `UPDATE users SET status = 'SUSPENDED', suspended_at = now(), suspension_reason = $2, updated_at = now()
           WHERE id = $1 AND deleted_at IS NULL
@@ -351,15 +445,14 @@ router.post(
         [userId, reason],
         "admin:suspend",
       );
+      if (!user) throw new ConflictError("That user changed state. Try again.");
 
-      const sessions = suspendSessions
-        ? await tx.query(
-            `UPDATE auth_sessions SET revoked_at = now(), revoked_reason = 'suspended'
-              WHERE user_id = $1 AND revoked_at IS NULL`,
-            [userId],
-            "admin:revokeOnSuspend",
-          )
-        : { rowCount: 0 };
+      const sessions = await tx.query(
+        `UPDATE auth_sessions SET revoked_at = now(), revoked_reason = 'suspended'
+          WHERE user_id = $1 AND revoked_at IS NULL`,
+        [userId],
+        "admin:revokeOnSuspend",
+      );
 
       await recordAudit(
         {
@@ -388,25 +481,26 @@ router.post(
   asyncHandler(async (req, res) => {
     const { userId, reason } = req.body;
 
-    const target = await queryOne(
-      "SELECT id, status FROM users WHERE id = $1 AND deleted_at IS NULL",
-      [userId],
-      "admin:loadRestoreTarget",
-    );
-
-    if (!target) throw new NotFoundError("That user");
-    if (target.status !== "SUSPENDED") throw new ConflictError("That account is not suspended.");
-
     const restored = await withTransaction(async (tx) => {
+      const target = await tx.queryOne(
+        "SELECT id, status FROM users WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        [userId],
+        "admin:loadRestoreTarget",
+      );
+
+      if (!target) throw new NotFoundError("That user");
+      if (target.status !== "SUSPENDED") throw new ConflictError("That account is not suspended.");
+
       const user = await tx.queryOne(
         `UPDATE users
             SET status = CASE WHEN email_verified_at IS NULL THEN 'PENDING_VERIFICATION' ELSE 'ACTIVE' END,
                 suspended_at = NULL, suspension_reason = NULL, updated_at = now()
-          WHERE id = $1
+          WHERE id = $1 AND status = 'SUSPENDED'
           RETURNING id, email, status`,
         [userId],
         "admin:restore",
       );
+      if (!user) throw new ConflictError("That account changed state. Try again.");
 
       await recordAudit(
         {
@@ -479,87 +573,184 @@ router.post(
   validate({ body: resolveReportSchema }),
   asyncHandler(async (req, res) => {
     const { reportId, status, resolution, action } = req.body;
-
-    const report = await queryOne("SELECT id, target_type, target_id, status FROM reports WHERE id = $1", [
-      reportId,
-    ], "admin:loadReport");
-
-    if (!report) throw new NotFoundError("That report");
-
-    if (report.status === "RESOLVED" || report.status === "DISMISSED") {
-      throw new ConflictError("That report is already closed.");
-    }
-
     const result = await withTransaction(async (tx) => {
-      let targetAffected = null;
+      const report = await tx.queryOne(
+        `SELECT id, target_type, target_id, category, status
+           FROM reports
+          WHERE id = $1
+          FOR UPDATE`,
+        [reportId],
+        "admin:loadReportForUpdate",
+      );
+
+      if (!report) throw new NotFoundError("That report");
+      if (["RESOLVED", "DISMISSED"].includes(report.status)) {
+        throw new ConflictError("That report is already closed.");
+      }
+
+      assertReportActionTarget(action, report.target_type);
+      if (status === "DISMISSED" && action !== "NONE") {
+        throw new AppError("A dismissed report cannot apply a moderation action.", {
+          status: 422,
+          code: "INVALID_REPORT_DISMISSAL_ACTION",
+        });
+      }
+      assertReportResolution(status, action);
+
+      let targetAffected = 0;
 
       if (action === "REMOVE_CONTENT") {
-        const affected =
-          report.target_type === "MESSAGE"
-            ? await tx.query("UPDATE messages SET deleted_at = now() WHERE id = $1", [report.target_id], "admin:removeMessage")
-            : await tx.query("UPDATE resources SET is_deleted = TRUE, updated_at = now() WHERE id = $1", [report.target_id], "admin:removeResource");
-        targetAffected = affected.rowCount;
+        const affected = report.target_type === "MESSAGE"
+          ? await tx.query(
+              "UPDATE messages SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
+              [report.target_id],
+              "admin:removeMessage",
+            )
+          : await tx.query(
+              "UPDATE resources SET is_deleted = TRUE, updated_at = now() WHERE id = $1 AND is_deleted = FALSE",
+              [report.target_id],
+              "admin:removeResource",
+            );
+
+        // Direct messages share the report vocabulary with workspace messages.
+        // Only try that table when the workspace-message update found nothing.
+        const directMessage = report.target_type === "MESSAGE" && affected.rowCount === 0
+          ? await tx.query(
+              "UPDATE direct_messages SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
+              [report.target_id],
+              "admin:removeDirectMessage",
+            )
+          : { rowCount: 0 };
+        targetAffected = (affected.rowCount ?? 0) + (directMessage.rowCount ?? 0);
+        if (targetAffected !== 1) {
+          throw new ConflictError("The reported content is no longer available.", {
+            code: "REPORT_TARGET_UNAVAILABLE",
+          });
+        }
       }
 
       if (action === "REMOVE_GROUP") {
         const affected = await tx.query(
-          "UPDATE study_groups SET status = 'ARCHIVED', archived_at = now() WHERE id = $1 AND status <> 'ARCHIVED'",
+          `UPDATE study_groups
+              SET status = 'ARCHIVED', archived_at = now(), updated_at = now()
+            WHERE id = $1 AND status IN ('ACTIVE', 'SUSPENDED')
+            RETURNING id`,
           [report.target_id],
-          "admin:archiveGroup",
+          "admin:archiveReportedGroup",
         );
-        targetAffected = affected.rowCount;
+        if ((affected.rowCount ?? 0) !== 1) {
+          throw new ConflictError("The reported group is already closed.", { code: "REPORT_TARGET_UNAVAILABLE" });
+        }
+        await tx.query(
+          `UPDATE workspaces
+              SET is_archived = TRUE, archived_at = now()
+            WHERE id IN (SELECT workspace_id FROM workspace_groups WHERE group_id = $1)
+              AND NOT is_archived`,
+          [report.target_id],
+          "admin:archiveReportedWorkspaces",
+        );
+        await tx.query(
+          "UPDATE study_group_invitations SET status = 'CANCELLED' WHERE group_id = $1 AND status = 'PENDING'",
+          [report.target_id],
+          "admin:cancelReportedInvitations",
+        );
+        await tx.query(
+          "UPDATE study_group_join_requests SET status = 'CANCELLED' WHERE group_id = $1 AND status = 'PENDING'",
+          [report.target_id],
+          "admin:cancelReportedRequests",
+        );
+        targetAffected = 1;
       }
 
-      if (action === "SUSPEND_USER" && report.target_type === "STUDENT") {
+      if (action === "SUSPEND_USER") {
         const target = await tx.queryOne(
-          "SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL",
+          `SELECT u.id, u.status, r.key AS role
+             FROM users u JOIN roles r ON r.id = u.role_id
+            WHERE u.id = $1 AND u.deleted_at IS NULL
+            FOR UPDATE OF u`,
           [report.target_id],
           "admin:suspendReported",
         );
 
-        if (target) {
-          await tx.query(
-            `UPDATE users SET status = 'SUSPENDED', suspended_at = now(), suspension_reason = $2, updated_at = now()
-              WHERE id = $1`,
-            [report.target_id, `Report ${report.id}: ${report.category}`],
-            "admin:suspendReportedUser",
-          );
-
-          await tx.query(
-            `UPDATE auth_sessions SET revoked_at = now(), revoked_reason = 'moderation' WHERE user_id = $1 AND revoked_at IS NULL`,
-            [report.target_id],
-            "admin:revokeReported",
-          );
-          targetAffected = 1;
+        if (!target) {
+          throw new ConflictError("The reported account is no longer available.", { code: "REPORT_TARGET_UNAVAILABLE" });
         }
+        if (target.role === "ADMIN") {
+          throw new AppError("Report moderation cannot suspend an administrator.", {
+            status: 403,
+            code: "ADMIN_MODERATION_FORBIDDEN",
+          });
+        }
+        if (["SUSPENDED", "DEACTIVATED"].includes(target.status)) {
+          throw new ConflictError("The reported account is already unavailable.", { code: "REPORT_TARGET_UNAVAILABLE" });
+        }
+
+        const suspended = await tx.query(
+          `UPDATE users
+              SET status = 'SUSPENDED', suspended_at = now(), suspension_reason = $2, updated_at = now()
+            WHERE id = $1 AND status NOT IN ('SUSPENDED', 'DEACTIVATED')`,
+          [report.target_id, `Report ${report.id}: ${report.category}`],
+          "admin:suspendReportedUser",
+        );
+        if ((suspended.rowCount ?? 0) !== 1) {
+          throw new ConflictError("The reported account changed state. Try again.", { code: "REPORT_TARGET_UNAVAILABLE" });
+        }
+
+        await tx.query(
+          `UPDATE auth_sessions
+              SET revoked_at = now(), revoked_reason = 'moderation'
+            WHERE user_id = $1 AND revoked_at IS NULL`,
+          [report.target_id],
+          "admin:revokeReported",
+        );
+        targetAffected = 1;
       }
 
-      if (action === "WARN_USER" && report.target_type === "STUDENT") {
+      if (action === "WARN_USER") {
+        const target = await tx.queryOne(
+          "SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+          [report.target_id],
+          "admin:warnReported",
+        );
+        if (!target) {
+          throw new ConflictError("The reported account is no longer available.", { code: "REPORT_TARGET_UNAVAILABLE" });
+        }
+
         const { notify } = await import("../lib/notifications.js");
-        await notify(
+        const delivery = await notify(
           {
             userId: report.target_id,
             type: "MODERATION",
             title: "A moderation notice",
             body: "Our team has reviewed a report about your activity. Please review the community guidelines.",
           },
-          { tx },
+          { tx, force: true },
         );
+        if (!delivery.created) {
+          throw new ConflictError("The moderation notice could not be delivered.", { code: "REPORT_ACTION_FAILED" });
+        }
         targetAffected = 1;
       }
 
       const closed = await tx.queryOne(
         `UPDATE reports SET status = $2, resolution = $3, handled_by = $4, handled_at = now()
-          WHERE id = $1 RETURNING *`,
+          WHERE id = $1 AND status IN ('OPEN', 'IN_REVIEW') RETURNING *`,
         [reportId, status, resolution ?? null, req.user.id],
         "admin:resolveReport",
       );
+      if (!closed) throw new ConflictError("That report changed state. Try again.");
+
+      const auditAction = status === "DISMISSED"
+        ? AUDIT.REPORT_DISMISSED
+        : action === "NONE"
+          ? AUDIT.REPORT_RESOLVED
+          : AUDIT.REPORT_ACTIONED;
 
       await recordAudit(
         {
           actor: req.user,
           req,
-          action: AUDIT.REPORT_RESOLVED,
+          action: auditAction,
           entityType: "report",
           entityId: reportId,
           metadata: { status, action, targetType: report.target_type, targetId: report.target_id, targetAffected },
@@ -603,7 +794,9 @@ router.get(
       "admin:auditLog",
     );
 
-    return ok(res, { entries: rows });
+    return ok(res, {
+      entries: rows.map((row) => ({ ...row, metadata: sanitiseMetadata(row.metadata) })),
+    });
   }),
 );
 
@@ -620,25 +813,30 @@ router.put(
   writeLimiter,
   validate({ params: z.object({ key: z.string().max(80) }), body: settingsSchema }),
   asyncHandler(async (req, res) => {
-    const setting = await queryOne(
-      `INSERT INTO system_settings (key, value, description, updated_by)
-       VALUES ($1, $2::jsonb, $3, $4)
-       ON CONFLICT (key) DO UPDATE
-         SET value = EXCLUDED.value, description = EXCLUDED.description,
-             updated_by = EXCLUDED.updated_by, updated_at = now()
-       RETURNING key, value, description, updated_at`,
-      [req.params.key, JSON.stringify(req.body.value ?? null), req.body.description ?? "", req.user.id],
-      "admin:updateSetting",
-    );
+    const setting = await withTransaction(async (tx) => {
+      const updated = await tx.queryOne(
+        `INSERT INTO system_settings (key, value, description, updated_by)
+         VALUES ($1, $2::jsonb, $3, $4)
+         ON CONFLICT (key) DO UPDATE
+           SET value = EXCLUDED.value, description = EXCLUDED.description,
+               updated_by = EXCLUDED.updated_by, updated_at = now()
+         RETURNING key, value, description, updated_at`,
+        [req.params.key, JSON.stringify(req.body.value ?? null), req.body.description ?? "", req.user.id],
+      );
 
-    await recordAudit({
+      await recordAudit(
+        {
           actor: req.user,
           req,
-      action: AUDIT.SETTINGS_UPDATED,
-      entityType: "system_setting",
-      entityId: req.params.key,
-      metadata: { value: req.body.value },
-    });
+          action: AUDIT.SETTINGS_UPDATED,
+          entityType: "system_setting",
+          entityId: req.params.key,
+          metadata: { value: req.body.value },
+        },
+        { tx },
+      );
+      return updated;
+    }, "admin:updateSetting");
 
     return ok(res, { setting });
   }),
@@ -649,16 +847,21 @@ router.delete(
   writeLimiter,
   validate({ params: z.object({ key: z.string().max(80) }) }),
   asyncHandler(async (req, res) => {
-    const result = await query("DELETE FROM system_settings WHERE key = $1", [req.params.key], "admin:deleteSetting");
-    if (result.rowCount === 0) throw new NotFoundError("That setting");
+    await withTransaction(async (tx) => {
+      const result = await tx.query("DELETE FROM system_settings WHERE key = $1", [req.params.key]);
+      if (result.rowCount === 0) throw new NotFoundError("That setting");
 
-    await recordAudit({
+      await recordAudit(
+        {
           actor: req.user,
           req,
-      action: "setting.deleted",
-      entityType: "system_setting",
-      entityId: req.params.key,
-    });
+          action: AUDIT.SETTING_DELETED,
+          entityType: "system_setting",
+          entityId: req.params.key,
+        },
+        { tx },
+      );
+    }, "admin:deleteSetting");
 
     return ok(res, { deleted: true });
   }),
@@ -909,7 +1112,7 @@ router.get(
   validate({
     query: z.object({
       q: z.string().trim().max(120).optional(),
-      status: z.enum(["ACTIVE", "ARCHIVED", "DISBANDED"]).optional(),
+      status: z.enum(["ACTIVE", "ARCHIVED", "DISBANDED", "SUSPENDED"]).optional(),
       limit: z.coerce.number().int().min(1).max(100).default(50),
       cursor: z.coerce.number().int().min(0).default(0),
     }),
@@ -1022,13 +1225,27 @@ router.post(
 
     let course;
     try {
-      course = await queryOne(
-        `INSERT INTO courses (course_code, name, department_id, description, credit_hours, level)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, course_code, name, level, is_active, credit_hours, department_id`,
-        [courseCode.trim(), name.trim(), departmentId ?? null, description ?? "", creditHours ?? null, level ?? null],
-        "admin:createCourse",
-      );
+      course = await withTransaction(async (tx) => {
+        const createdCourse = await tx.queryOne(
+          `INSERT INTO courses (course_code, name, department_id, description, credit_hours, level)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING id, course_code, name, level, is_active, credit_hours, department_id`,
+          [courseCode.trim(), name.trim(), departmentId ?? null, description ?? "", creditHours ?? null, level ?? null],
+        );
+
+        await recordAudit(
+          {
+            actor: req.user,
+            req,
+            action: AUDIT.COURSE_CREATED,
+            entityType: "course",
+            entityId: createdCourse.id,
+            metadata: { courseCode: createdCourse.course_code, name: createdCourse.name },
+          },
+          { tx },
+        );
+        return createdCourse;
+      }, "admin:createCourse");
     } catch (error) {
       // The unique index on course_code raises 23505; present it as a 409 the
       // form can show on the offending field.
@@ -1037,15 +1254,6 @@ router.post(
       }
       throw error;
     }
-
-    await recordAudit({
-      actor: req.user,
-      req,
-      action: AUDIT.COURSE_CREATED,
-      entityType: "course",
-      entityId: course.id,
-      metadata: { courseCode: course.course_code, name: course.name },
-    });
 
     return created(res, { course });
   }),
@@ -1097,28 +1305,34 @@ router.patch(
 
     let updated;
     try {
-      updated = await queryOne(
-        `UPDATE courses SET ${assignments.join(", ")} WHERE id = $1
-         RETURNING id, course_code, name, level, is_active, credit_hours, department_id`,
-        [courseId, ...values],
-        "admin:updateCourse",
-      );
+      updated = await withTransaction(async (tx) => {
+        const changed = await tx.queryOne(
+          `UPDATE courses SET ${assignments.join(", ")} WHERE id = $1
+           RETURNING id, course_code, name, level, is_active, credit_hours, department_id`,
+          [courseId, ...values],
+        );
+        if (!changed) throw new ConflictError("That course changed state. Try again.");
+
+        const wasArchived = updates.isActive !== undefined && existing.is_active !== updates.isActive;
+        await recordAudit(
+          {
+            actor: req.user,
+            req,
+            action: wasArchived && updates.isActive === false ? AUDIT.COURSE_ARCHIVED : AUDIT.COURSE_UPDATED,
+            entityType: "course",
+            entityId: courseId,
+            metadata: { courseCode: changed.course_code, changes: Object.keys(updates) },
+          },
+          { tx },
+        );
+        return changed;
+      }, "admin:updateCourse");
     } catch (error) {
       if (error.code === "DUPLICATE") {
         throw new ConflictError("A course with that code already exists.", { code: "DUPLICATE", fields: { courseCode: "That course code is already in use." } });
       }
       throw error;
     }
-
-    const wasArchived = updates.isActive !== undefined && existing.is_active !== updates.isActive;
-    await recordAudit({
-      actor: req.user,
-      req,
-      action: wasArchived && updates.isActive === false ? AUDIT.COURSE_ARCHIVED : AUDIT.COURSE_UPDATED,
-      entityType: "course",
-      entityId: courseId,
-      metadata: { courseCode: updated.course_code, changes: Object.keys(updates) },
-    });
 
     return ok(res, { course: updated });
   }),

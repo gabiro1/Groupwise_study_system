@@ -2,14 +2,9 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import "./test-database.js";
 
 const RUN = randomUUID().slice(0, 8);
-const rawDatabaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
-if (!rawDatabaseUrl) throw new Error("Integration tests require DATABASE_URL to be set.");
-
-process.env.NODE_ENV = "test";
-process.env.DATABASE_URL = rawDatabaseUrl;
-process.env.AUTH_SECRET = process.env.TEST_AUTH_SECRET || "integration-test-auth-secret-0123456789abcdef";
 process.env.RATE_LIMIT_MAX = "100000";
 process.env.AUTH_RATE_LIMIT_MAX = "100000";
 process.env.AI_RATE_LIMIT_MAX = "100000";
@@ -66,9 +61,16 @@ async function createUser(label) {
     [id, tag(label), await hashPassword("Meet!2026test"), role.id, label], "t:cu2",
   );
   createdUserIds.push(id);
+  const sessionId = randomUUID();
+  await query(
+    `INSERT INTO auth_sessions (id, user_id, refresh_token_hash, expires_at)
+     VALUES ($1, $2, $3, now() + interval '1 day')`,
+    [sessionId, id, `test-session-${sessionId}`],
+    "t:cs",
+  );
   const token = signAccessToken({
     userId: id, role: "STUDENT", roleId: role.id,
-    sessionId: randomUUID(), email: tag(label), name: label,
+    sessionId, email: tag(label), name: label,
   });
   return { id, token };
 }

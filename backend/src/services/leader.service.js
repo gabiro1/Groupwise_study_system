@@ -8,8 +8,11 @@ const MANAGED_ROLES = "('OWNER', 'MODERATOR')";
 
 export async function managedGroupIds(userId) {
   const rows = await queryRows(
-    `SELECT group_id FROM study_group_members
-      WHERE student_id = $1 AND left_at IS NULL AND role IN ${MANAGED_ROLES}`,
+    `SELECT m.group_id
+       FROM study_group_members m
+       JOIN study_groups g ON g.id = m.group_id
+       WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE' AND m.role IN ${MANAGED_ROLES}
+        AND g.status = 'ACTIVE'`,
     [userId],
     "leader:managedGroupIds",
   );
@@ -20,9 +23,10 @@ export async function listPendingRequests(actorId, { groupId } = {}) {
   const params = [actorId];
   const clauses = [
     "jr.status = 'PENDING'",
+    "g.status = 'ACTIVE'",
     `EXISTS (SELECT 1 FROM study_group_members mm
               WHERE mm.group_id = jr.group_id AND mm.student_id = $1
-                AND mm.left_at IS NULL AND mm.role IN ${MANAGED_ROLES})`,
+                 AND mm.left_at IS NULL AND mm.status = 'ACTIVE' AND mm.role IN ${MANAGED_ROLES})`,
   ];
 
   if (groupId) {
@@ -57,9 +61,10 @@ export async function listPendingInvitations(actorId, { groupId } = {}) {
   const clauses = [
     "i.status = 'PENDING'",
     "i.expires_at > now()",
+    "g.status = 'ACTIVE'",
     `EXISTS (SELECT 1 FROM study_group_members mm
               WHERE mm.group_id = i.group_id AND mm.student_id = $1
-                AND mm.left_at IS NULL AND mm.role IN ${MANAGED_ROLES})`,
+                 AND mm.left_at IS NULL AND mm.status = 'ACTIVE' AND mm.role IN ${MANAGED_ROLES})`,
   ];
 
   if (groupId) {
@@ -130,9 +135,10 @@ export async function cancelInvitation(groupId, actorId, invitationId) {
 export async function listLeaderSessions(actorId, { groupId, scope = "upcoming", limit = 20 } = {}) {
   const params = [actorId];
   const clauses = [
+    "g.status = 'ACTIVE'",
     `EXISTS (SELECT 1 FROM study_group_members mm
               WHERE mm.group_id = g.id AND mm.student_id = $1
-                AND mm.left_at IS NULL AND mm.role IN ${MANAGED_ROLES})`,
+                 AND mm.left_at IS NULL AND mm.status = 'ACTIVE' AND mm.role IN ${MANAGED_ROLES})`,
   ];
 
   if (groupId) {
@@ -157,11 +163,12 @@ export async function listLeaderSessions(actorId, { groupId, scope = "upcoming",
             (SELECT count(*)::int FROM session_participants p
               WHERE p.session_id = s.id AND p.rsvp = 'GOING') AS going_count,
             (SELECT count(*)::int FROM study_group_members m2
-              WHERE m2.group_id = g.id AND m2.left_at IS NULL) AS member_count
+               WHERE m2.group_id = g.id AND m2.left_at IS NULL AND m2.status = 'ACTIVE') AS member_count
        FROM study_sessions s
        JOIN workspaces w ON w.id = s.workspace_id
-       JOIN study_groups g ON g.id = w.group_id
-      WHERE ${clauses.join(" AND ")}
+       JOIN workspace_groups wg ON wg.workspace_id = w.id
+       JOIN study_groups g ON g.id = wg.group_id
+       WHERE NOT w.is_archived AND ${clauses.join(" AND ")}
       ORDER BY ${scope === "past" ? "s.starts_at DESC" : "s.starts_at ASC"}
       LIMIT $${params.length}`,
     params,
@@ -177,10 +184,10 @@ export async function groupAnalytics(groupId, actorId, { days = 30 } = {}) {
 
   const [membership, activity, byType, sessions, tasks, chat, joinSources] = await Promise.all([
     queryOne(
-      `SELECT count(*) FILTER (WHERE left_at IS NULL)::int AS active,
-              count(*) FILTER (WHERE left_at IS NULL AND role = 'OWNER')::int AS owners,
-              count(*) FILTER (WHERE left_at IS NULL AND role = 'MODERATOR')::int AS moderators,
-              count(*) FILTER (WHERE left_at IS NULL AND role = 'MEMBER')::int AS members,
+       `SELECT count(*) FILTER (WHERE left_at IS NULL AND status = 'ACTIVE')::int AS active,
+               count(*) FILTER (WHERE left_at IS NULL AND status = 'ACTIVE' AND role = 'OWNER')::int AS owners,
+               count(*) FILTER (WHERE left_at IS NULL AND status = 'ACTIVE' AND role = 'MODERATOR')::int AS moderators,
+               count(*) FILTER (WHERE left_at IS NULL AND status = 'ACTIVE' AND role = 'MEMBER')::int AS members,
               count(*) FILTER (WHERE joined_at > now() - ($2 || ' days')::interval)::int AS joined_in_window,
               count(*) FILTER (WHERE left_at > now() - ($2 || ' days')::interval)::int AS left_in_window
          FROM study_group_members WHERE group_id = $1`,
@@ -207,9 +214,10 @@ export async function groupAnalytics(groupId, actorId, { days = 30 } = {}) {
               count(*) FILTER (WHERE s.status = 'SCHEDULED' AND s.starts_at > now())::int AS upcoming,
               count(*) FILTER (WHERE s.status = 'COMPLETED')::int AS completed,
               count(*) FILTER (WHERE s.status = 'CANCELLED')::int AS cancelled
-         FROM study_sessions s
-         JOIN workspaces w ON w.id = s.workspace_id
-        WHERE w.group_id = $1`,
+             FROM study_sessions s
+             JOIN workspaces w ON w.id = s.workspace_id
+         WHERE NOT w.is_archived
+           AND EXISTS (SELECT 1 FROM workspace_groups wg WHERE wg.workspace_id = w.id AND wg.group_id = $1)`,
       [groupId],
       "leader:analyticsSessions",
     ),
@@ -218,17 +226,20 @@ export async function groupAnalytics(groupId, actorId, { days = 30 } = {}) {
               count(*) FILTER (WHERE t.status = 'COMPLETED')::int AS completed,
               count(*) FILTER (WHERE t.status <> 'COMPLETED'
                                  AND t.due_at IS NOT NULL AND t.due_at < now())::int AS overdue
-         FROM tasks t
-         JOIN workspaces w ON w.id = t.workspace_id
-        WHERE w.group_id = $1`,
+          FROM tasks t
+          JOIN workspaces w ON w.id = t.workspace_id
+         WHERE NOT w.is_archived
+           AND EXISTS (SELECT 1 FROM workspace_groups wg WHERE wg.workspace_id = w.id AND wg.group_id = $1)`,
       [groupId],
       "leader:analyticsTasks",
     ),
     queryOne(
       `SELECT count(*)::int AS messages
-         FROM messages msg
-         JOIN workspaces w ON w.id = msg.workspace_id
-        WHERE w.group_id = $1 AND msg.deleted_at IS NULL
+          FROM messages msg
+          JOIN workspaces w ON w.id = msg.workspace_id
+         WHERE NOT w.is_archived
+           AND EXISTS (SELECT 1 FROM workspace_groups wg WHERE wg.workspace_id = w.id AND wg.group_id = $1)
+           AND msg.deleted_at IS NULL
           AND msg.created_at > now() - ($2 || ' days')::interval`,
       [groupId, window],
       "leader:analyticsChat",
@@ -246,9 +257,10 @@ export async function groupAnalytics(groupId, actorId, { days = 30 } = {}) {
     `SELECT count(*) FILTER (WHERE p.rsvp = 'GOING')::int AS going,
             count(*) FILTER (WHERE p.attended IS TRUE)::int AS attended
        FROM session_participants p
-       JOIN study_sessions s ON s.id = p.session_id
-       JOIN workspaces w ON w.id = s.workspace_id
-      WHERE w.group_id = $1`,
+        JOIN study_sessions s ON s.id = p.session_id
+        JOIN workspaces w ON w.id = s.workspace_id
+       WHERE NOT w.is_archived
+         AND EXISTS (SELECT 1 FROM workspace_groups wg WHERE wg.workspace_id = w.id AND wg.group_id = $1)`,
     [groupId],
     "leader:analyticsAttendance",
   );
@@ -299,9 +311,10 @@ export async function postAnnouncement(groupId, actorId, { title, body }) {
   );
 
   const workspace = await queryOne(
-    `SELECT id FROM workspaces
-      WHERE group_id = $1 AND NOT is_archived
-      ORDER BY created_at DESC LIMIT 1`,
+    `SELECT w.id FROM workspace_groups wg
+       JOIN workspaces w ON w.id = wg.workspace_id
+      WHERE wg.group_id = $1 AND NOT w.is_archived
+      ORDER BY wg.assigned_at DESC LIMIT 1`,
     [groupId],
     "leader:announcementWorkspace",
   );

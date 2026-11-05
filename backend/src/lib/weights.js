@@ -37,12 +37,12 @@ export const MODEL_METADATA = Object.freeze({
     /** How much a candidate's data quality modulates their score. */
     confidenceInfluence: 0.12,
     /** Below this, a candidate is not shown at all. */
-    minimumScore: 25,
+    minimumScore: 40,
     /** Above this, the candidate is labelled "exceptional match". */
     strongMatch: 80,
     /** How many results to return by default. */
     defaultLimit: 20,
-    /** Weight given to similarity vs complementarity in the headline number. */
+    /** Reserved for future controlled experiments; diagnostics do not alter the headline score. */
     complementarityEmphasis: 0.6,
   },
 });

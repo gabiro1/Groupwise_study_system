@@ -13,6 +13,7 @@ import AiMatchSearch from "./AiMatchSearch";
 import FloatingAssistant from "./FloatingAssistant";
 import MeetingsLazy from "./meetings/MeetingsLazy";
 import ThemeToggle from "../ThemeToggle";
+import { NAV_GROUPS as leaderNavGroups } from "./leader/sections";
 
 const navGroups = [
   {
@@ -107,6 +108,13 @@ function Icon({ name, size = 18, strokeWidth = 1.8 }) {
     close: <><path d="m18 6-12 12M6 6l12 12" /></>,
     menu: <><path d="M4 6h16M4 12h16M4 18h16" /></>,
     video: <><rect x="2" y="6" width="13" height="12" rx="2" /><path d="m15 10 6-3v10l-6-3" /></>,
+    inbox: <><path d="M4 4h16v6H4z" /><path d="M4 13h5l1.5 2.5h3L15 13h5" /><path d="M4 4v13l2 3h12l2-3V4" /></>,
+    mail: <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 7 9 6 9-6" /></>,
+    spark: <><path d="M12 3v4M12 17v4M3 12h4M17 12h4" /><path d="m6.3 6.3 2.8 2.8M14.9 14.9l2.8 2.8M17.7 6.3l-2.8 2.8M9.1 14.9l-2.8 2.8" /></>,
+    chart: <><path d="M4 19V5M4 19h17" /><path d="M8 16v-5M12 16V8M16 16v-7" /></>,
+    layers: <><path d="m12 3 9 5-9 5-9-5 9-5Z" /><path d="m3 13 9 5 9-5M3 17l9 5 9-5" /></>,
+    folder: <path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
+    chevronDown: <path d="m6 9 6 6 6-6" />,
   };
 
   return <svg {...shared}>{paths[name] || paths.home}</svg>;
@@ -201,6 +209,25 @@ function formatActivityDate(value) {
 
 function memberName(member) {
   return [member.firstName || member.first_name, member.lastName || member.last_name].filter(Boolean).join(" ") || "Group member";
+}
+
+function DashboardSkeleton() {
+  return (
+    <div className="dashboard-skeleton" role="status" aria-label="Loading study space">
+      <span className="sr-only">Loading your study space…</span>
+      <div className="dashboard-skeleton-hero"><span /><span /><span /></div>
+      <div className="dashboard-skeleton-cards"><span /><span /><span /></div>
+      <div className="dashboard-skeleton-content"><span /><span /></div>
+    </div>
+  );
+}
+
+function DashboardDataSkeleton() {
+  return (
+    <div className="dashboard-data-skeleton" role="status" aria-label="Loading data">
+      <span /><span /><span />
+    </div>
+  );
 }
 
 /**
@@ -307,7 +334,7 @@ function GroupLeadershipPanel({ group, currentUserId, onClose }) {
       </div>
       {error && <div className="feature-error" role="alert">{error}</div>}
       {message && <div className="feature-success" role="status">{message}</div>}
-      {loading && <p className="empty-state" role="status">Loading the moderation queue…</p>}
+      {loading && <DashboardDataSkeleton />}
 
       {!loading && (
         <>
@@ -614,7 +641,7 @@ useEffect(() => {
       {tab === "direct" && (
         <div className="dm-shell">
           <aside className="dm-sidebar">
-            {convoLoading && <p className="empty-state">Loading...</p>}
+            {convoLoading && <DashboardDataSkeleton />}
             {!convoLoading && conversations.length === 0 && (
               <p className="empty-state">No direct conversations yet. Connect with a study partner to start chatting.</p>
             )}
@@ -654,7 +681,7 @@ useEffect(() => {
                   <strong>{activeConvo.peer?.firstName} {activeConvo.peer?.lastName}</strong>
                 </div>
                 <div className="workspace-bubble-list" ref={msgListRef}>
-                  {msgLoading && <p className="empty-state">Loading messages...</p>}
+                  {msgLoading && <DashboardDataSkeleton />}
                   {!msgLoading && messages.length === 0 && <p className="empty-state">No messages yet. Say hello!</p>}
                   {messages.map((msg) => {
                     const initials = [msg.sender?.firstName?.[0], msg.sender?.lastName?.[0]].filter(Boolean).join("").toUpperCase() || "?";
@@ -720,7 +747,7 @@ useEffect(() => {
           {!loading && workspaces.length === 0 && (
             <p className="empty-state">No group workspaces yet. Join or create a study group to start a conversation.</p>
           )}
-          {loading && <p className="empty-state">Loading your workspaces...</p>}
+          {loading && <DashboardDataSkeleton />}
         </>
       )}
     </section>
@@ -805,7 +832,7 @@ function DashboardSection({ section, search, setSearch, searchRef, groups, works
         {!loading && filteredWorkspaces.length === 0 && (
           <p className="empty-state">You don’t have a workspace yet. Join or create a study group and its shared workspace will appear here.</p>
         )}
-        {loading && <p className="empty-state">Loading your workspaces...</p>}
+        {loading && <DashboardDataSkeleton />}
       </section>
     );
   }
@@ -900,7 +927,7 @@ function DashboardSection({ section, search, setSearch, searchRef, groups, works
               </Fragment>
             ))}
             {!loading && filteredGroups.length === 0 && <p className="empty-state">{isDiscover ? "No study groups match this search yet." : "You haven't joined a study group yet. Explore groups to find your people."}</p>}
-            {loading && <p className="empty-state">Loading study groups...</p>}
+            {loading && <DashboardDataSkeleton />}
           </div>
           {isDiscover && !loading && <Link className="browse-groups" href="/dashboard/courses"><Icon name="book" size={16} /> Browse your courses</Link>}
         </section>
@@ -927,7 +954,7 @@ function DashboardSection({ section, search, setSearch, searchRef, groups, works
               </article>
             ))}
             {!loading && sessions.length === 0 && <p className="empty-state">There are no upcoming sessions in your study groups yet.</p>}
-            {loading && <p className="empty-state">Loading study sessions...</p>}
+            {loading && <DashboardDataSkeleton />}
           </div>
         </section>
       </section>
@@ -951,7 +978,7 @@ function DashboardSection({ section, search, setSearch, searchRef, groups, works
           </article>
         ))}
         {!loading && courses.length === 0 && <p className="empty-state">No courses are linked to your profile yet.</p>}
-        {loading && <p className="empty-state">Loading your courses...</p>}
+        {loading && <DashboardDataSkeleton />}
       </div>
     </section>
   );
@@ -989,6 +1016,14 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
   const [discoveredGroups, setDiscoveredGroups] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [hasLeadership, setHasLeadership] = useState(false);
+  const [leaderGroupsOpen, setLeaderGroupsOpen] = useState(true);
+  const [leaderWorkspacesOpen, setLeaderWorkspacesOpen] = useState(true);
+  const [workspaceAssignmentOpen, setWorkspaceAssignmentOpen] = useState(false);
+  const [assignmentGroupId, setAssignmentGroupId] = useState("");
+  const [assignmentWorkspaceId, setAssignmentWorkspaceId] = useState("");
+  const [assignmentBusy, setAssignmentBusy] = useState(false);
+  const [assignmentError, setAssignmentError] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadedDiscoverySearch, setLoadedDiscoverySearch] = useState(null);
   const [loadError, setLoadError] = useState("");
@@ -999,7 +1034,20 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
     () => myGroups.filter((group) => `${group.name} ${group.course}`.toLowerCase().includes(search.toLowerCase())),
     [myGroups, search],
   );
+  const groupsByWorkspace = useMemo(
+    () => new Map(workspaces.map((workspace) => [
+      workspace.id,
+      myGroups.filter((group) => group.workspaceId === workspace.id || group.id === workspace.groupId),
+    ])),
+    [myGroups, workspaces],
+  );
+  const unassignedGroups = useMemo(() => myGroups.filter((group) => !group.workspaceId), [myGroups]);
+  const manageableGroups = useMemo(
+    () => myGroups.filter((group) => ["OWNER", "MODERATOR"].includes(group.myRole)),
+    [myGroups],
+  );
   const activeNav = sectionTitles[section] || "Overview";
+  const isGroupLeader = identity?.role === "GROUP_LEADER" || hasLeadership;
   const discoverLoading = section === "discover" && loadedDiscoverySearch !== search;
   const workspacePageTab = workspaceTabConfig[workspaceTab];
   const sidebarWorkspace = workspaces.find((item) => item.id === workspaceId) || workspaces[0];
@@ -1022,15 +1070,15 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
       }
 
       if (!active) return;
-      if (auth.user?.role !== "STUDENT") {
+      if (auth.user?.role === "GROUP_LEADER" && section === "overview") {
+        window.location.replace("/dashboard/leader");
+        return;
+      }
+      if (!["STUDENT", "GROUP_LEADER"].includes(auth.user?.role)) {
         // Route other roles to their own home rather than showing an access
-        // error they cannot act on. A lecturer belongs in /dashboard/lecturer.
+        // error they cannot act on.
         if (auth.user?.role === "ADMIN") {
           window.location.replace("/admin");
-          return;
-        }
-        if (auth.user?.role === "LECTURER") {
-          window.location.replace("/dashboard/lecturer");
           return;
         }
         setLoadError("Your account is signed in, but it does not have student access to this dashboard.");
@@ -1051,6 +1099,7 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
         // Group leaders belong in their dedicated dashboard. Only the landing
         // view redirects, so the shared student pages (Discover, Messages, …)
         // stay reachable for them.
+        setHasLeadership((leaderResult.groups || []).length > 0 || auth.user?.role === "GROUP_LEADER");
         if (section === "overview" && (leaderResult.groups || []).length > 0) {
           window.location.replace("/dashboard/leader");
           return;
@@ -1151,7 +1200,7 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
   }
 
   function openWorkspaceCreate() {
-    const firstGroup = myGroups[0];
+    const firstGroup = manageableGroups[0];
     setWorkspaceCreateGroupId(firstGroup?.id || "");
     setWorkspaceCreateName(firstGroup ? `${firstGroup.name} study space` : "");
     setWorkspaceCreateDescription("");
@@ -1270,6 +1319,9 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
         createdWorkspace,
         ...current.filter((workspace) => workspace.id !== createdWorkspace.id),
       ].sort((a, b) => new Date(b.lastActivityAt || 0) - new Date(a.lastActivityAt || 0)));
+      setMyGroups((current) => current.map((group) => group.id === workspaceCreateGroupId
+        ? { ...group, workspaceId: createdWorkspace.id }
+        : group));
       setWorkspaceCreateOpen(false);
       showNotice("Workspace created.");
     } catch (error) {
@@ -1288,7 +1340,46 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
     try {
       await apiRequest(`workspaces/${workspace.id}`, { method: "DELETE" });
       setWorkspaces((current) => current.filter((item) => item.id !== workspace.id));
+      setMyGroups((current) => current.map((group) => group.workspaceId === workspace.id
+        ? { ...group, workspaceId: null }
+        : group));
       showNotice("Workspace archived. Its contents are preserved.");
+    } catch (error) {
+      showNotice(error.message);
+    }
+  }
+
+  function openWorkspaceAssignment(group) {
+    setAssignmentGroupId(group.id);
+    setAssignmentWorkspaceId(workspaces[0]?.id || "");
+    setAssignmentError("");
+    setWorkspaceAssignmentOpen(true);
+  }
+
+  async function submitWorkspaceAssignment(event) {
+    event.preventDefault();
+    setAssignmentBusy(true);
+    setAssignmentError("");
+    try {
+      await apiRequest(`workspaces/${assignmentWorkspaceId}/groups/${assignmentGroupId}`, { method: "POST" });
+      setMyGroups((current) => current.map((group) => group.id === assignmentGroupId
+        ? { ...group, workspaceId: assignmentWorkspaceId }
+        : group));
+      setWorkspaceAssignmentOpen(false);
+      showNotice("Group assigned to the workplace.");
+    } catch (error) {
+      setAssignmentError(error.message);
+    } finally {
+      setAssignmentBusy(false);
+    }
+  }
+
+  async function unassignGroup(workspace, group) {
+    if (!window.confirm(`Remove ${group.name} from ${workspace.name}?`)) return;
+    try {
+      await apiRequest(`workspaces/${workspace.id}/groups/${group.id}`, { method: "DELETE" });
+      setMyGroups((current) => current.map((item) => item.id === group.id ? { ...item, workspaceId: null } : item));
+      showNotice("Group removed from the workplace.");
     } catch (error) {
       showNotice(error.message);
     }
@@ -1367,11 +1458,26 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
           <BrandLogo className="lien-logo" />
         </Link>
 
-        {navGroups.map((group) => (
+        {(isGroupLeader ? leaderNavGroups : navGroups).map((group) => (
           <div className="sidebar-nav-group" key={group.label}>
             <div className="sidebar-label">{group.label}</div>
             <nav className="side-nav" aria-label={group.label.toLowerCase()}>
               {group.items.map((item) => (
+                <Fragment key={item.key || item.label}>
+                {isGroupLeader && item.key ? (
+                <div className="leader-nav-row" key={item.key}>
+                  <Link
+                    className={`nav-link leader-nav-button ${item.key === "overview" && section === "overview" ? "active" : ""}`}
+                    href={item.key === "overview" ? "/dashboard/leader" : `/dashboard/leader?section=${item.key}`}
+                    aria-current={item.key === "overview" && section === "overview" ? "page" : undefined}
+                  >
+                    <Icon name={item.icon} size={18} />
+                    <span>{item.label}</span>
+                    {isGroupLeader && item.label === "My Groups" && <span className="sidebar-tree-count">{myGroups.length}</span>}
+                    {isGroupLeader && item.label === "Workspaces" && <span className="sidebar-tree-count">{workspaces.length}</span>}
+                  </Link>
+                </div>
+              ) : (
                 <div
                   className={`nav-link-row ${item.label === "Workspaces" ? "workspace-nav-row" : ""} ${item.label === "My Groups" ? "group-nav-row" : ""}`}
                   key={item.label}
@@ -1384,7 +1490,7 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
                     <Icon name={item.icon} size={18} />
                     <span>{item.label}</span>
                   </Link>
-                  {item.label === "My Groups" && (
+                  {!isGroupLeader && item.label === "My Groups" && (
                     <div
                       className="workspace-more-wrap"
                       onBlur={(event) => {
@@ -1425,7 +1531,7 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
                       )}
                     </div>
                   )}
-                  {item.label === "My Groups" && (
+                  {!isGroupLeader && item.label === "My Groups" && (
                     <button
                       className="workspace-add-button"
                       type="button"
@@ -1436,7 +1542,7 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
                       <Icon name="plus" size={16} />
                     </button>
                   )}
-                  {item.label === "Workspaces" && (
+                  {!isGroupLeader && item.label === "Workspaces" && (
                     <>
                       <div
                         className="workspace-more-wrap"
@@ -1488,10 +1594,83 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
                       </button>
                     </>
                   )}
+                  {isGroupLeader && (item.label === "My Groups" || item.label === "Workspaces") && (
+                    <button
+                      className="sidebar-tree-toggle"
+                      type="button"
+                      aria-label={`${item.label} ${item.label === "My Groups" ? (leaderGroupsOpen ? "collapse" : "expand") : (leaderWorkspacesOpen ? "collapse" : "expand")}`}
+                      aria-expanded={item.label === "My Groups" ? leaderGroupsOpen : leaderWorkspacesOpen}
+                      aria-controls={item.label === "My Groups" ? "leader-group-tree" : "leader-workspace-tree"}
+                      title={item.label === "My Groups" ? "Show or hide your groups" : "Show or hide your workspaces"}
+                      onClick={() => item.label === "My Groups"
+                        ? setLeaderGroupsOpen((open) => !open)
+                        : setLeaderWorkspacesOpen((open) => !open)}
+                    >
+                      <Icon name="chevronDown" size={15} />
+                    </button>
+                  )}
                 </div>
+                  )}
+                  {isGroupLeader && item.label === "My Groups" && leaderGroupsOpen && (
+                    <div className="sidebar-tree-children" id="leader-group-tree" role="group" aria-label="Your groups">
+                      <div className="sidebar-label">YOUR GROUPS</div>
+                      <div className="leader-group-list">
+                        {myGroups.map((group) => (
+                          <div className="leader-group-row" key={group.id}>
+                            <Link className="leader-group-item" href={`/dashboard/leader?groupId=${group.id}`}>
+                              <span className="leader-group-name"><span className="sidebar-tree-node-dot" aria-hidden="true" />{group.name}</span>
+                              <span className="leader-group-meta">{group.myRole || "Leader"} · {group.memberCount} {group.memberCount === 1 ? "member" : "members"}</span>
+                            </Link>
+                            {!group.workspaceId && ["OWNER", "MODERATOR"].includes(group.myRole) && workspaces.length > 0 && (
+                              <button className="sidebar-tree-action" type="button" onClick={() => openWorkspaceAssignment(group)} title="Assign this group to a workplace" aria-label={`Assign ${group.name} to a workplace`}><Icon name="plus" size={13} /></button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {isGroupLeader && item.label === "Workspaces" && leaderWorkspacesOpen && (
+                    <div className="sidebar-tree-children" id="leader-workspace-tree" role="group" aria-label="Your workspaces">
+                      <div className="sidebar-tree-heading">
+                        <div className="sidebar-label">YOUR WORKSPACES</div>
+                        <button className="sidebar-tree-action" type="button" onClick={openWorkspaceCreate} title="Create a workplace" aria-label="Create a workplace"><Icon name="plus" size={13} /></button>
+                      </div>
+                      <div className="workspace-tree-list">
+                        {workspaces.map((workspace) => {
+                          const workspaceGroups = groupsByWorkspace.get(workspace.id) || [];
+                          return (
+                            <div className="workspace-tree-node" key={workspace.id}>
+                              <Link className={`workspace-tree-item ${section === "workspace" && workspaceId === workspace.id ? "active" : ""}`} href={`/dashboard/workspaces/${workspace.id}`}>
+                                <span className="workspace-tree-name"><span className="sidebar-tree-node-dot workspace" aria-hidden="true" />{workspace.name}</span>
+                                <span className="sidebar-tree-count">{workspaceGroups.length}</span>
+                              </Link>
+                              {workspaceGroups.length > 0 && (
+                                <div className="workspace-tree-groups" role="group" aria-label={`Groups in ${workspace.name}`}>
+                                  {workspaceGroups.map((group) => (
+                                    <div className="workspace-tree-group-row" key={group.id}>
+                                      <Link className="workspace-tree-group" href={`/dashboard/leader?groupId=${group.id}`}>
+                                        <span className="workspace-tree-group-name"><span className="sidebar-tree-node-dot" aria-hidden="true" />{group.name}</span>
+                                        <span className="leader-group-meta">{group.myRole || "Member"} · {group.memberCount} {group.memberCount === 1 ? "member" : "members"}</span>
+                                      </Link>
+                                      {group.id !== workspace.groupId && ["OWNER", "MODERATOR"].includes(group.myRole) && (
+                                        <button className="sidebar-tree-action danger" type="button" onClick={() => unassignGroup(workspace, group)} title="Remove group from workplace" aria-label={`Remove ${group.name} from ${workspace.name}`}><Icon name="close" size={12} /></button>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                        {workspaces.length === 0 && <span className="leader-group-meta">No workspaces yet. Create one to organize your groups.</span>}
+                        {unassignedGroups.length > 0 && <span className="leader-group-meta workspace-unassigned-note">{unassignedGroups.length} group{unassignedGroups.length === 1 ? "" : "s"} not assigned to a workplace</span>}
+                      </div>
+                    </div>
+                  )}
+                </Fragment>
               ))}
             </nav>
-            {group.label === "YOUR SPACE" && workspaces.length > 0 && workspaceActions.length > 0 && (
+            {!isGroupLeader && group.label === "YOUR SPACE" && workspaces.length > 0 && workspaceActions.length > 0 && (
               <nav className="workspace-feature-nav" aria-label="Workspace tools">
                 {workspaceActions.map((item) => {
                   const href = `/dashboard/workspaces/${sidebarWorkspace.id}?tab=${item.tab}`;
@@ -1510,7 +1689,7 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
                 })}
               </nav>
             )}
-            {group.label === "YOUR SPACE" && workspaces.length > 0 && (
+            {!isGroupLeader && group.label === "YOUR SPACE" && workspaces.length > 0 && (
               <div className="recent-workspaces">
                 <span className="recent-workspaces-label">RECENT WORKSPACES</span>
                 {workspaces.slice(0, 3).map((workspace) => (
@@ -1529,6 +1708,20 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
           </div>
         ))}
 
+        {isGroupLeader && myGroups.length === 0 && (
+          <div className="sidebar-nav-group">
+            <div className="sidebar-label">YOUR GROUPS</div>
+            <div className="leader-group-list">
+              {myGroups.map((group) => (
+                <Link className="leader-group-item" href={`/dashboard/leader?groupId=${group.id}`} key={group.id}>
+                  <span className="leader-group-name">{group.name}</span>
+                  <span className="leader-group-meta">{group.myRole || "Leader"} · {group.memberCount} {group.memberCount === 1 ? "member" : "members"}</span>
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
+
         {identity?.role === "ADMIN" && (
           <div className="sidebar-nav-group">
             <div className="sidebar-label">STAFF</div>
@@ -1542,7 +1735,11 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
         )}
 
         <div className="sidebar-spacer" />
-        <div className="weekly-card">
+        {isGroupLeader ? (
+          <div className="leader-sidebar-foot"><ThemeToggle /></div>
+        ) : (
+          <>
+          <div className="weekly-card">
           <div className="weekly-icon"><Icon name="check" size={17} /></div>
           <p className="weekly-title">Small steps add up.</p>
           <p className="weekly-copy">{myGroups.length ? `You’re learning with ${myGroups.length} ${myGroups.length === 1 ? "study group" : "study groups"}.` : "Join a study group to start learning together."}</p>
@@ -1551,7 +1748,9 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
           <Avatar initials={initials} className="profile-avatar" src={profile?.user?.avatarUrl} />
           <span className="profile-copy"><strong>{displayName}</strong><small>{profile?.academic?.programName || profile?.academic?.universityName || "Student"}</small></span>
           <Icon name="chevron" size={16} />
-        </Link>
+          </Link>
+          </>
+        )}
       </aside>
 
       <section className="main-panel">
@@ -1633,7 +1832,7 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
         <div className="content-wrap">
           {loadError && <div className="dashboard-load-error" role="alert"><strong>We couldn’t load your study space.</strong><span>{loadError}</span><button type="button" onClick={() => window.location.reload()}>Try again</button></div>}
           {identity && !identity.emailVerified && <div className="email-verification-notice" role="status">Your account is ready. You can verify your email later. <Link href={`/resend-verification?email=${encodeURIComponent(identity.email)}`}>Get a verification link</Link></div>}
-          {loading ? <div className="dashboard-loading" role="status">Loading your study space…</div> : loadError ? null : section === "workspace" ? (
+          {loading ? <DashboardSkeleton /> : loadError ? null : section === "workspace" ? (
             <StudyWorkspace
               workspaceId={workspaceId}
               initialTab={workspaceTab === "messages" ? "Group chat" : workspacePageTab?.initialTab}
@@ -1764,7 +1963,7 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
                 <Icon name="close" size={17} />
               </button>
             </div>
-            {myGroups.length ? (
+            {manageableGroups.length ? (
               <form className="workspace-create-form" onSubmit={submitWorkspaceCreate}>
                 <label>
                   Study group
@@ -1777,7 +1976,7 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
                       if (group) setWorkspaceCreateName(`${group.name} study space`);
                     }}
                   >
-                    {myGroups.map((group) => (
+                    {manageableGroups.map((group) => (
                       <option value={group.id} key={group.id}>{group.name} · {group.course}</option>
                     ))}
                   </select>
@@ -1812,10 +2011,42 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
               </form>
             ) : (
               <div className="workspace-create-empty">
-                <p>Join or create a study group first. Each workspace is shared with members of its group.</p>
+                <p>You need to own or moderate a study group before creating a workplace. Each workplace is shared with the groups assigned to it.</p>
                 <Link className="button button-primary" href="/dashboard/discover" onClick={() => setWorkspaceCreateOpen(false)}>Discover groups</Link>
               </div>
             )}
+          </section>
+        </div>
+      )}
+
+      {workspaceAssignmentOpen && (
+        <div className="workspace-modal-backdrop">
+          <section className="panel workspace-create-modal" role="dialog" aria-modal="true" aria-labelledby="workspace-assignment-title">
+            <div className="workspace-create-heading">
+              <div>
+                <span className="section-overline">WORKPLACE MANAGEMENT</span>
+                <h2 id="workspace-assignment-title">Assign group to workplace</h2>
+              </div>
+              <button className="workspace-modal-close" type="button" aria-label="Close" onClick={() => setWorkspaceAssignmentOpen(false)} disabled={assignmentBusy}><Icon name="close" size={17} /></button>
+            </div>
+            <form className="workspace-create-form" onSubmit={submitWorkspaceAssignment}>
+              <label>Study group
+                <select value={assignmentGroupId} onChange={(event) => setAssignmentGroupId(event.target.value)} required>
+                  {unassignedGroups.filter((group) => ["OWNER", "MODERATOR"].includes(group.myRole)).map((group) => <option value={group.id} key={group.id}>{group.name} · {group.course}</option>)}
+                </select>
+              </label>
+              <label>Workplace
+                <select value={assignmentWorkspaceId} onChange={(event) => setAssignmentWorkspaceId(event.target.value)} required>
+                  {workspaces.map((workspace) => <option value={workspace.id} key={workspace.id}>{workspace.name}</option>)}
+                </select>
+              </label>
+              <p className="feature-muted">A group can belong to one active workplace. Its members will share the workplace resources and discussions.</p>
+              {assignmentError && <p className="workspace-create-error" role="alert">{assignmentError}</p>}
+              <div className="workspace-create-actions">
+                <button className="button button-secondary" type="button" onClick={() => setWorkspaceAssignmentOpen(false)} disabled={assignmentBusy}>Cancel</button>
+                <button className="button button-primary" type="submit" disabled={assignmentBusy || !assignmentGroupId || !assignmentWorkspaceId}>{assignmentBusy ? "Assigning…" : "Assign group"}</button>
+              </div>
+            </form>
           </section>
         </div>
       )}

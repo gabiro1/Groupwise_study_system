@@ -12,7 +12,8 @@ import { notify, notifyMany } from "../lib/notifications.js";
 import { NOTIFICATION_TYPE } from "../config/constants.js";
 import { aiStatus } from "../services/ai.service.js";
 import { getTargets, configuredKeys, configuredEmbeddingModel } from "../modules/ai/registry.js";
-import { getCircuitState, resetCircuit } from "../modules/ai/orchestration.js";
+import { getCircuitSnapshot, resetCircuit } from "../modules/ai/orchestration.js";
+import { buildPdf, sendPdf } from "../services/pdf.js";
 import { z } from "../lib/schemas.js";
 
 /**
@@ -179,13 +180,21 @@ router.post(
       );
 
       // Raise a plain student to group leader; never touch an existing admin.
-      await tx.query(
+      const promoted = await tx.query(
         `UPDATE users SET role_id = (SELECT id FROM roles WHERE key = 'GROUP_LEADER'), updated_at = now()
           WHERE id = $1
-            AND role_id = (SELECT id FROM roles WHERE key = 'STUDENT')`,
+            AND role_id = (SELECT id FROM roles WHERE key = 'STUDENT')
+          RETURNING id`,
         [userId],
         "admin:promoteLeaderRole",
       );
+      const sessionsRevoked = promoted.rowCount
+        ? await tx.query(
+            "UPDATE auth_sessions SET revoked_at = now(), revoked_reason = 'role_change' WHERE user_id = $1 AND revoked_at IS NULL",
+            [userId],
+            "admin:revokeLeaderPromotionSessions",
+          )
+        : { rowCount: 0 };
 
       await recordAudit(
         {
@@ -194,7 +203,12 @@ router.post(
           action: AUDIT.GROUP_LEADER_ASSIGNED,
           entityType: "study_group",
           entityId: groupId,
-          metadata: { userId, groupName: group.name, membershipRole: membership.role },
+          metadata: {
+            userId,
+            groupName: group.name,
+            membershipRole: membership.role,
+            sessionsRevoked: sessionsRevoked.rowCount ?? 0,
+          },
         },
         { tx },
       );
@@ -211,10 +225,10 @@ router.post(
         { tx },
       );
 
-      return membership;
+      return { membership, sessionsRevoked: sessionsRevoked.rowCount ?? 0 };
     }, "admin:assignLeader");
 
-    return ok(res, { membership: result, userId, groupId });
+    return ok(res, { ...result, userId, groupId });
   }),
 );
 
@@ -262,13 +276,22 @@ router.delete(
         "admin:countLeadingGroups",
       );
 
+      let sessionsRevoked = 0;
       if (remaining.n === 0) {
-        await tx.query(
+        const demoted = await tx.query(
           `UPDATE users SET role_id = (SELECT id FROM roles WHERE key = 'STUDENT'), updated_at = now()
             WHERE id = $1 AND role_id = (SELECT id FROM roles WHERE key = 'GROUP_LEADER')`,
           [userId],
           "admin:demoteLeaderRole",
         );
+        if ((demoted.rowCount ?? 0) > 0) {
+          const sessions = await tx.query(
+            "UPDATE auth_sessions SET revoked_at = now(), revoked_reason = 'role_change' WHERE user_id = $1 AND revoked_at IS NULL",
+            [userId],
+            "admin:revokeLeaderDemotionSessions",
+          );
+          sessionsRevoked = sessions.rowCount ?? 0;
+        }
       }
 
       await recordAudit(
@@ -278,15 +301,15 @@ router.delete(
           action: AUDIT.GROUP_LEADER_REMOVED,
           entityType: "study_group",
           entityId: groupId,
-          metadata: { userId, remainingGroups: remaining.n },
+          metadata: { userId, remainingGroups: remaining.n, sessionsRevoked },
         },
         { tx },
       );
 
-      return remaining.n;
+      return { remainingGroups: remaining.n, sessionsRevoked };
     }, "admin:removeLeader");
 
-    return ok(res, { removed: true, userId, groupId, stillLeading });
+    return ok(res, { removed: true, userId, groupId, stillLeading: stillLeading.remainingGroups, sessionsRevoked: stillLeading.sessionsRevoked });
   }),
 );
 
@@ -500,6 +523,8 @@ const rangeQuery = z.object({
     .default(30),
 });
 
+const exportQuery = rangeQuery.extend({ format: z.enum(["csv", "pdf"]).default("csv") });
+
 /** Dense day-by-day series so a chart never skips a quiet day. */
 function dailySeries(range, rows) {
   const days = [];
@@ -599,14 +624,73 @@ router.get(
   }),
 );
 
-/** GET /api/admin/analytics/export — the same data as a CSV download. */
+/** GET /api/admin/analytics/export — the same data as a CSV or PDF download. */
 router.get(
   "/analytics/export",
   searchLimiter,
-  validate({ query: rangeQuery }),
+  validate({ query: exportQuery }),
   asyncHandler(async (req, res) => {
-    const { range } = req.query;
+    const { range, format } = req.query;
     const data = await collectAnalytics(range);
+
+    if (format === "pdf") {
+      const buffer = buildPdf({
+        title: "Lien platform analytics",
+        subtitle: `Last ${range} days`,
+        meta: [["Generated", data.generatedAt]],
+        sections: [
+          {
+            heading: "Account and content totals",
+            table: {
+              columns: [
+                { label: "Metric", width: 260 },
+                { label: "Value", width: 240 },
+              ],
+              rows: [
+                ["Students", data.totals.students],
+                ["Group leaders", data.totals.groupLeaders],
+                ["Administrators", data.totals.admins],
+                ["Active accounts", data.totals.activeAccounts],
+                ["Study groups", data.totals.groups],
+                ["Active groups", data.totals.activeGroups],
+                ["Workspaces", data.totals.workspaces],
+                ["Sessions", data.totals.sessions],
+                ["Meetings", data.totals.meetings],
+                ["Pending reports", data.totals.pendingReports],
+              ],
+            },
+          },
+          {
+            heading: "Active users",
+            pairs: [
+              ["Active in the last 7 days", data.activeUsers.last7Days],
+              ["Active in the last 30 days", data.activeUsers.last30Days],
+            ],
+          },
+          {
+            heading: "Daily activity",
+            table: {
+              columns: [
+                { label: "Date", width: 110 },
+                { label: "Registrations", width: 100 },
+                { label: "Groups", width: 90 },
+                { label: "Sessions", width: 100 },
+                { label: "Meetings", width: 100 },
+              ],
+              rows: data.series.labels.map((label, index) => [
+                label,
+                data.series.registrations[index],
+                data.series.groups[index],
+                data.series.sessions[index],
+                data.series.meetings[index],
+              ]),
+            },
+          },
+        ],
+      });
+
+      return sendPdf(res, `lien-analytics-${range}d.pdf`, buffer);
+    }
 
     const escape = (value) => {
       const text = value === null || value === undefined ? "" : String(value);
@@ -729,6 +813,7 @@ router.post(
       entityType: "notification_broadcast",
       entityId: broadcastId,
       metadata: { audience, attempted: delivery.attempted, delivered: delivery.delivered },
+      required: true,
     });
 
     return ok(res, {
@@ -767,9 +852,16 @@ router.get(
 // AI configuration (masked — provider metadata and failover state only)
 // ---------------------------------------------------------------------------
 
+/**
+ * Plain string circuit state for a target.
+ *
+ * The orchestration layer exposes live breaker objects through
+ * `getCircuitState`; those serialise to `{}`, so the old helper handed the UI an
+ * object where it expected "CLOSED"/"OPEN". The snapshot is plain data.
+ */
 function safeCircuitState(targetId) {
   try {
-    return getCircuitState(targetId) ?? "CLOSED";
+    return getCircuitSnapshot(targetId)?.state ?? "CLOSED";
   } catch {
     return "CLOSED";
   }
@@ -822,6 +914,7 @@ router.post(
       entityType: "ai_provider",
       entityId: id,
       metadata: { circuit: safeCircuitState(id) },
+      required: true,
     });
 
     return ok(res, { id, circuit: safeCircuitState(id) });

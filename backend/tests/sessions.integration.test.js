@@ -2,6 +2,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import "./test-database.js";
 
 // ---------------------------------------------------------------------------
 // Environment — set BEFORE importing the app, because `env.js` validates on
@@ -9,29 +10,8 @@ import { randomUUID } from "node:crypto";
 // ---------------------------------------------------------------------------
 const RUN = randomUUID().slice(0, 8);
 
-const rawDatabaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
-if (!rawDatabaseUrl) {
-  throw new Error("Integration tests require DATABASE_URL or TEST_DATABASE_URL to be set.");
-}
+/* Database and test-only environment are configured by test-database.js. */
 
-function toTestDatabaseUrl(url) {
-  try {
-    const parsed = new URL(url);
-    const dbName = parsed.pathname.replace(/^\//, "");
-    if (!dbName || /_test$/.test(dbName)) return url;
-    parsed.pathname = `/${dbName}_test`;
-    return parsed.toString();
-  } catch {
-    return url;
-  }
-}
-
-const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL || toTestDatabaseUrl(rawDatabaseUrl);
-const TEST_AUTH_SECRET = process.env.TEST_AUTH_SECRET || "integration-test-auth-secret-0123456789abcdef";
-
-process.env.NODE_ENV = "test";
-process.env.DATABASE_URL = TEST_DATABASE_URL;
-process.env.AUTH_SECRET = TEST_AUTH_SECRET;
 process.env.RATE_LIMIT_MAX = "100000";
 process.env.AUTH_RATE_LIMIT_MAX = "100000";
 process.env.AI_RATE_LIMIT_MAX = "100000";
@@ -101,11 +81,18 @@ async function createUser(roleKey, label) {
     "test:createUser",
   );
   createdUserIds.push(id);
+  const sessionId = randomUUID();
+  await query(
+    `INSERT INTO auth_sessions (id, user_id, refresh_token_hash, expires_at)
+     VALUES ($1, $2, $3, now() + interval '1 day')`,
+    [sessionId, id, `test-session-${sessionId}`],
+    "test:createSession",
+  );
   const token = signAccessToken({
     userId: id,
     role: roleKey,
     roleId: role.id,
-    sessionId: randomUUID(),
+    sessionId,
     email: tag(label),
     name: label,
   });
@@ -185,10 +172,26 @@ async function groupFixture() {
     );
   }
 
-  const workspace = await queryOne(
+  let workspace = await queryOne(
     "SELECT id FROM workspaces WHERE group_id = $1 LIMIT 1",
     [groupId],
     "test:workspace",
+  );
+  if (!workspace) {
+    workspace = await queryOne(
+      `INSERT INTO workspaces (group_id, name, created_by)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [groupId, `Sessions Workspace ${RUN}-${n}`, owner.id],
+      "test:createWorkspace",
+    );
+  }
+  await query(
+    `INSERT INTO workspace_groups (workspace_id, group_id, assigned_by)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (workspace_id, group_id) DO NOTHING`,
+    [workspace.id, groupId, owner.id],
+    "test:assignWorkspaceGroup",
   );
   assert.ok(workspace, "group trigger creates a workspace");
 

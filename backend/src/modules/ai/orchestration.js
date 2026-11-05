@@ -55,6 +55,9 @@ function circuitBreaker(key, opts = { failThreshold: 3, resetTimeoutMs: 30_000, 
       failures = 0;
       lastFailureAt = null;
     },
+    snapshot() {
+      return { state, failures, lastFailureAt: lastFailureAt ? new Date(lastFailureAt).toISOString() : null };
+    },
   };
 }
 
@@ -158,4 +161,21 @@ export function getCircuitState(targetId = null) {
     return breaker ? { [targetId]: breaker } : {};
   }
   return Object.fromEntries(CIRCUIT_STATE);
+}
+
+/**
+ * Plain-data circuit snapshot: { state, failures, lastFailureAt }.
+ *
+ * `getCircuitState` returns live breaker objects, which is useful internally but
+ * serialises to `{}` over JSON. The admin console needs the actual state, so this
+ * exposes only the safe, serialisable fields.
+ */
+export function getCircuitSnapshot(targetId = null) {
+  if (targetId) {
+    const breaker = CIRCUIT_STATE.get(targetId);
+    return breaker ? breaker.snapshot() : { state: "CLOSED", failures: 0, lastFailureAt: null };
+  }
+  return Object.fromEntries(
+    [...CIRCUIT_STATE.entries()].map(([id, breaker]) => [id, breaker.snapshot()]),
+  );
 }

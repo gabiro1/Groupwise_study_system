@@ -27,6 +27,7 @@ import {
 import { recordAudit, AUDIT } from "../lib/audit.js";
 import logger from "../config/logger.js";
 import { sendMail } from "./mailer.js";
+import { registrationPolicy } from "./settings.service.js";
 
 /**
  * Authentication service.
@@ -83,6 +84,24 @@ async function seedUserDefaults(tx, userId) {
  */
 export async function register({ email, password, firstName, lastName, universityId, programId, yearOfStudy }, { req, actor } = {}) {
   const normalisedEmail = email.trim().toLowerCase();
+
+  // Registration policy is operator-controlled, never client-controlled. It is
+  // checked before any expensive hashing so a closed platform costs nothing.
+  const policy = await registrationPolicy();
+  if (!policy.enabled) {
+    throw new ForbiddenError("New registrations are currently closed. Contact your administrator for an account.");
+  }
+  if (policy.allowedDomains.length) {
+    const domain = normalisedEmail.split("@")[1] ?? "";
+    if (!policy.allowedDomains.includes(domain)) {
+      throw new AppError("Registration is limited to approved university email domains.", {
+        status: 422,
+        code: "REGISTRATION_DOMAIN_NOT_ALLOWED",
+        fields: { email: "Use your university email address." },
+      });
+    }
+  }
+
   const passwordHash = await hashPassword(password);
   const { token: refreshToken, hash: refreshTokenHash } = createRefreshToken();
   const expiresAt = refreshTokenExpiry();
@@ -113,7 +132,14 @@ export async function register({ email, password, firstName, lastName, universit
        VALUES ($1, $2, $3, $4, $5, $6, now(), now())
        RETURNING id, email, first_name, last_name, avatar_url, status, email_verified_at,
                  created_at, role_id`,
-      [normalisedEmail, passwordHash, role.id, USER_STATUS.ACTIVE, firstName.trim(), lastName.trim()],
+      [
+        normalisedEmail,
+        passwordHash,
+        role.id,
+        policy.requireEmailVerification ? USER_STATUS.PENDING_VERIFICATION : USER_STATUS.ACTIVE,
+        firstName.trim(),
+        lastName.trim(),
+      ],
       "auth:insert",
     );
 
@@ -454,7 +480,7 @@ export async function refresh({ refreshToken }, { req } = {}) {
   if (new Date(session.expires_at) < new Date()) {
     throw new AuthenticationError("Your session has expired. Please sign in again.");
   }
-  if (session.status === USER_STATUS.SUSPENDED) {
+  if (session.status === USER_STATUS.SUSPENDED || session.status === USER_STATUS.DEACTIVATED) {
     throw new ForbiddenError("This account has been suspended.");
   }
 

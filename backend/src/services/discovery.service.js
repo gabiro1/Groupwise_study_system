@@ -11,6 +11,11 @@ import {
 import { computeCompatibility, buildExplanation, strengthLabel } from "../lib/scoring.js";
 import { STUDY_MODES, LEARNING_GOAL_LABELS } from "../config/constants.js";
 
+function canReceivePartnerInvite(row) {
+  const policy = row.allow_invites_from ?? "ANY";
+  return policy === "ANY" || (policy === "SHARED_GROUPS" && Boolean(row.already_shares_group));
+}
+
 /**
  * Discovery service — finding *other students*, as opposed to finding groups.
  *
@@ -97,8 +102,9 @@ export async function searchStudents(viewerId, filters = {}) {
               WHERE sc1.student_id = $1 AND sc2.student_id = u.id AND sc2.is_active) AS shared_course_count,
             EXISTS (SELECT 1 FROM study_group_members m1
                      JOIN study_group_members m2 ON m2.group_id = m1.group_id
-                    WHERE m1.student_id = $1 AND m1.left_at IS NULL
-                      AND m2.student_id = u.id AND m2.left_at IS NULL) AS already_shares_group
+                     WHERE m1.student_id = $1 AND m1.left_at IS NULL AND m1.status = 'ACTIVE'
+                       AND m2.student_id = u.id AND m2.left_at IS NULL AND m2.status = 'ACTIVE'
+                       AND EXISTS (SELECT 1 FROM study_groups sg WHERE sg.id = m1.group_id AND sg.status = 'ACTIVE')) AS already_shares_group
        FROM users u
        JOIN student_profiles sp ON sp.user_id = u.id
        LEFT JOIN universities uni ON uni.id = sp.university_id
@@ -158,9 +164,9 @@ export async function searchStudents(viewerId, filters = {}) {
       warnings: scored ? scored.warnings : [],
       // What the viewer may do, resolved server-side. The client renders buttons
       // from this instead of deciding for itself.
-      canInvite: row.allow_invites_from !== "NOBODY",
+      canInvite: canReceivePartnerInvite(row),
       inviteBlockedReason:
-        row.allow_invites_from === "NOBODY"
+        !canReceivePartnerInvite(row)
           ? "This student is not accepting invitations right now."
           : null,
     };
@@ -256,8 +262,9 @@ function buildSearchFilters(viewerId, filters) {
     clauses.push(
       `NOT EXISTS (SELECT 1 FROM study_group_members m1
                      JOIN study_group_members m2 ON m2.group_id = m1.group_id
-                    WHERE m1.student_id = ${viewerIdParam} AND m1.left_at IS NULL
-                      AND m2.student_id = u.id AND m2.left_at IS NULL
+                     WHERE m1.student_id = ${viewerIdParam} AND m1.left_at IS NULL AND m1.status = 'ACTIVE'
+                       AND m2.student_id = u.id AND m2.left_at IS NULL AND m2.status = 'ACTIVE'
+                       AND EXISTS (SELECT 1 FROM study_groups sg WHERE sg.id = m1.group_id AND sg.status = 'ACTIVE')
                       AND m1.group_id = ${groupId})`,
     );
   }
@@ -496,8 +503,9 @@ export async function getStudentProfile(viewerId, studentId) {
               WHERE sc1.student_id = $1 AND sc2.student_id = u.id AND sc2.is_active) AS shares_course,
             EXISTS (SELECT 1 FROM study_group_members m1
                      JOIN study_group_members m2 ON m2.group_id = m1.group_id
-                    WHERE m1.student_id = $1 AND m1.left_at IS NULL
-                      AND m2.student_id = u.id AND m2.left_at IS NULL) AS already_shares_group
+                     WHERE m1.student_id = $1 AND m1.left_at IS NULL AND m1.status = 'ACTIVE'
+                       AND m2.student_id = u.id AND m2.left_at IS NULL AND m2.status = 'ACTIVE'
+                       AND EXISTS (SELECT 1 FROM study_groups sg WHERE sg.id = m1.group_id AND sg.status = 'ACTIVE')) AS already_shares_group
        FROM users u
        JOIN student_profiles sp ON sp.user_id = u.id
        LEFT JOIN universities uni ON uni.id = sp.university_id
@@ -601,7 +609,7 @@ export async function getStudentProfile(viewerId, studentId) {
     compatibility: scored ? { score: scored.score, label: strengthLabel(scored.score) } : null,
     reasons: scored?.reasons ?? [],
     warnings: scored?.warnings ?? [],
-    canInvite: row.allow_invites_from !== "NOBODY",
+    canInvite: canReceivePartnerInvite(row),
     isSelf: false,
   };
 }
@@ -668,10 +676,10 @@ export async function getSharedGroups(viewerId, studentId) {
        FROM study_group_members theirs
        JOIN study_group_members mine
          ON mine.group_id = theirs.group_id
-        AND mine.student_id = $1 AND mine.left_at IS NULL
+         AND mine.student_id = $1 AND mine.left_at IS NULL AND mine.status = 'ACTIVE'
        JOIN study_groups g ON g.id = theirs.group_id
        JOIN courses c ON c.id = g.course_id
-      WHERE theirs.student_id = $2 AND theirs.left_at IS NULL AND g.status = 'ACTIVE'
+       WHERE theirs.student_id = $2 AND theirs.left_at IS NULL AND theirs.status = 'ACTIVE' AND g.status = 'ACTIVE'
       ORDER BY theirs.joined_at DESC`,
     [viewerId, studentId],
     "discovery:sharedGroups",

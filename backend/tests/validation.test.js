@@ -11,6 +11,7 @@ import {
   updateSessionSchema,
   createGroupSchema,
   recommendationRequestSchema,
+  recommendationWeightsSchema,
   registerSchema,
   resendVerificationSchema,
 } from "../src/lib/schemas.js";
@@ -188,5 +189,36 @@ describe("recommendation request", () => {
 
   it("rejects an unknown match kind", () => {
     assert.equal(recommendationRequestSchema.safeParse({ kind: "ALGORITHM" }).success, false);
+  });
+});
+
+describe("recommendation weights", () => {
+  it("accepts a complete normalized weighting", () => {
+    assert.equal(
+      recommendationWeightsSchema.safeParse({
+        course: 0.25,
+        skills: 0.25,
+        goals: 0.2,
+        availability: 0.15,
+        preferences: 0.1,
+        topics: 0.05,
+      }).success,
+      true,
+    );
+  });
+
+  it("rejects weights that do not sum to one or contain unknown keys", () => {
+    assert.equal(
+      recommendationWeightsSchema.safeParse({
+        course: 1,
+        skills: 0,
+        goals: 0,
+        availability: 0,
+        preferences: 0,
+        topics: 0,
+        unexpected: 0,
+      }).success,
+      false,
+    );
   });
 });

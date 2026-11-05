@@ -2,6 +2,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import "./test-database.js";
 
 /**
  * HTTP-level authorization integration tests.
@@ -13,8 +14,8 @@ import { randomUUID } from "node:crypto";
  * from Postgres on every protected request. Nothing here mocks the app, the
  * middleware, or the database.
  *
- * The suite is pointed at a dedicated test database through `TEST_DATABASE_URL`
- * (falling back to a `*_test` name derived from the configured `DATABASE_URL`),
+ * The suite is pointed at a dedicated test database through an explicit
+ * `TEST_DATABASE_URL`,
  * so it never touches a development or production database. All fixtures use a
  * unique per-run prefix and are removed in `after`, so the suite is
  * deterministic, repeatable, and safe to run alongside other work.
@@ -29,35 +30,8 @@ import { randomUUID } from "node:crypto";
 // ---------------------------------------------------------------------------
 const RUN = randomUUID().slice(0, 8);
 
-const rawDatabaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
-if (!rawDatabaseUrl) {
-  throw new Error("Integration tests require DATABASE_URL or TEST_DATABASE_URL to be set.");
-}
+/* Database and test-only environment are configured by test-database.js. */
 
-// Derive a dedicated *_test database from the configured URL unless one is
-// given explicitly, so the suite can never run against the dev/prod database.
-function toTestDatabaseUrl(url) {
-  try {
-    const parsed = new URL(url);
-    const dbName = parsed.pathname.replace(/^\//, "");
-    if (!dbName || /_test$/.test(dbName)) return url;
-    parsed.pathname = `/${dbName}_test`;
-    return parsed.toString();
-  } catch {
-    return url;
-  }
-}
-
-const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL || toTestDatabaseUrl(rawDatabaseUrl);
-
-// A 32+ character secret satisfies the existing AUTH_SECRET rule; it is a
-// test-only value and is never used outside this process.
-const TEST_AUTH_SECRET = process.env.TEST_AUTH_SECRET || "integration-test-auth-secret-0123456789abcdef";
-
-// Assign onto process.env: env.js and db.js read these during import.
-process.env.NODE_ENV = "test";
-process.env.DATABASE_URL = TEST_DATABASE_URL;
-process.env.AUTH_SECRET = TEST_AUTH_SECRET;
 // Raise every limiter well above what this suite issues. These are ordinary
 // environment values that pass the existing Zod validation unchanged.
 process.env.RATE_LIMIT_MAX = "100000";
@@ -114,6 +88,7 @@ const tag = (label) => `authz-${RUN}-${label}@example.test`;
 
 const createdUserIds = [];
 const createdGroupIds = [];
+const createdReportIds = [];
 let fixtureCounter = 0;
 
 /**
@@ -132,8 +107,15 @@ async function createUser(roleKey, label) {
     [id, tag(label), await hashPassword("Authz!2026test"), role.id, label, "User"],
     "test:createUser",
   );
+  const sessionId = randomUUID();
+  await query(
+    `INSERT INTO auth_sessions (id, user_id, refresh_token_hash, expires_at)
+     VALUES ($1, $2, $3, now() + interval '1 day')`,
+    [sessionId, id, `test-session-${sessionId}`],
+    "test:createSession",
+  );
   createdUserIds.push(id);
-  return { id, role: roleKey, roleId: role.id, email: tag(label) };
+  return { id, role: roleKey, roleId: role.id, email: tag(label), sessionId };
 }
 
 /** Mint a real access token exactly as the auth service does. */
@@ -142,7 +124,7 @@ function tokenFor(user) {
     userId: user.id,
     role: user.role,
     roleId: user.roleId,
-    sessionId: randomUUID(),
+    sessionId: user.sessionId,
     email: user.email,
     name: `${user.role} ${user.id.slice(0, 4)}`,
   });
@@ -248,11 +230,37 @@ async function createGroupFixture() {
     "test:joinRequest",
   );
 
-  return { groupId, requestId, owner, moderator, member, requester };
+  let workspace = await queryOne(
+    "SELECT id FROM workspaces WHERE group_id = $1 AND NOT is_archived LIMIT 1",
+    [groupId],
+    "test:groupWorkspace",
+  );
+  if (!workspace) {
+    workspace = await queryOne(
+      `INSERT INTO workspaces (group_id, name, created_by)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [groupId, `Authz Workspace ${RUN}-${n}`, owner.id],
+      "test:createWorkspace",
+    );
+  }
+  await query(
+    `INSERT INTO workspace_groups (workspace_id, group_id, assigned_by)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (workspace_id, group_id) DO NOTHING`,
+    [workspace.id, groupId, owner.id],
+    "test:assignWorkspaceGroup",
+  );
+  assert.ok(workspace, "the group trigger creates an active workspace");
+
+  return { groupId, workspaceId: workspace.id, requestId, owner, moderator, member, requester };
 }
 
 /** Remove only the fixtures this suite created, in FK-safe order. */
 async function cleanupFixtures() {
+  for (const reportId of createdReportIds) {
+    await query("DELETE FROM reports WHERE id = $1", [reportId], "test:cleanupReport").catch(() => {});
+  }
   // study_groups.owner_id is ON DELETE RESTRICT, so groups go before users.
   // Deleting a group cascades to its members, requests, invitations, workspace.
   for (const groupId of createdGroupIds) {
@@ -433,6 +441,7 @@ describe("F. filing a report requires authentication", () => {
 
     assert.equal(status, 201, `expected 201, got ${status}: ${JSON.stringify(body)}`);
     assert.ok(body?.data?.report?.id, "a report id is returned");
+    createdReportIds.push(body.data.report.id);
 
     // The row really persisted against the real reporter.
     const row = await queryOne(
@@ -638,5 +647,387 @@ describe("H. a role change takes effect immediately, not at token expiry", () =>
     // 5–6. The same token is now denied, because the gate re-reads the role.
     const after = await call("GET", "/api/admin/users?limit=1", { token });
     assert.equal(after.status, 403, "the stale token no longer grants admin access");
+  });
+});
+
+// ===========================================================================
+// I. session invalidation and closed-group authorization
+// ===========================================================================
+describe("I. revoked sessions and closed groups cannot keep access", () => {
+  it("rejects an access JWT as soon as its database session is revoked", async () => {
+    const user = await createUser(ROLES.STUDENT, "revoked-session");
+    await query(
+      "UPDATE auth_sessions SET revoked_at = now(), revoked_reason = 'test' WHERE id = $1",
+      [user.sessionId],
+      "test:revokeSession",
+    );
+
+    const response = await call("GET", "/api/students/me", { token: tokenFor(user) });
+    assert.equal(response.status, 401);
+  });
+
+  it("denies workspace access while the parent group is suspended or archived", async () => {
+    const fx = await createGroupFixture();
+
+    await query(
+      `UPDATE study_groups
+          SET status = 'SUSPENDED', suspended_at = now(), suspended_reason = 'security test'
+        WHERE id = $1`,
+      [fx.groupId],
+      "test:suspendGroup",
+    );
+    const suspended = await call("GET", `/api/workspaces/${fx.workspaceId}`, { token: tokenFor(fx.owner) });
+    assert.equal(suspended.status, 404);
+
+    await query(
+      "UPDATE study_groups SET status = 'ARCHIVED', archived_at = now() WHERE id = $1",
+      [fx.groupId],
+      "test:archiveGroup",
+    );
+    const archived = await call("GET", `/api/workspaces/${fx.workspaceId}`, { token: tokenFor(fx.owner) });
+    assert.equal(archived.status, 404);
+  });
+
+  it("does not restore an archived group through the suspension restore route", async () => {
+    const fx = await createGroupFixture();
+    await query(
+      "UPDATE study_groups SET status = 'ARCHIVED', archived_at = now() WHERE id = $1",
+      [fx.groupId],
+      "test:archiveBeforeRestore",
+    );
+
+    const response = await call("POST", `/api/admin/groups/${fx.groupId}/restore`, {
+      token: tokenFor(admin),
+      body: { reason: "should not restore an owner-archived group" },
+    });
+    assert.equal(response.status, 409);
+    const row = await queryOne("SELECT status FROM study_groups WHERE id = $1", [fx.groupId], "test:restoreState");
+    assert.equal(row.status, "ARCHIVED");
+  });
+
+  it("archives a group and closes its workspace and pending requests", async () => {
+    const fx = await createGroupFixture();
+
+    const response = await call("POST", `/api/admin/groups/${fx.groupId}/archive`, {
+      token: tokenFor(admin),
+      body: { reason: "archive cascade test" },
+    });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+
+    const state = await queryOne(
+      `SELECT g.status, w.is_archived, jr.status AS request_status
+         FROM study_groups g
+         JOIN workspaces w ON w.id = $2
+         LEFT JOIN study_group_join_requests jr ON jr.id = $3
+        WHERE g.id = $1`,
+      [fx.groupId, fx.workspaceId, fx.requestId],
+      "test:archiveCascadeState",
+    );
+    assert.equal(state.status, "ARCHIVED");
+    assert.equal(state.is_archived, true);
+    assert.equal(state.request_status, "CANCELLED");
+  });
+});
+
+// ===========================================================================
+// J. report privacy and moderation invariants
+// ===========================================================================
+describe("J. reports do not disclose private targets", () => {
+  it("returns the same not-found result for private group, message and resource targets", async () => {
+    const fx = await createGroupFixture();
+    await query("UPDATE study_groups SET privacy = 'INVITE_ONLY' WHERE id = $1", [fx.groupId], "test:privateGroup");
+
+    const groupReport = await call("POST", "/api/reports", {
+      token: tokenFor(student),
+      body: {
+        targetType: "GROUP",
+        targetId: fx.groupId,
+        category: "SPAM",
+        details: "This private group should not be probeable.",
+      },
+    });
+    assert.equal(groupReport.status, 404);
+
+    const message = await queryOne(
+      `INSERT INTO messages (workspace_id, author_id, kind, body)
+       VALUES ($1, $2, 'TEXT', 'private message for the authorization test')
+       RETURNING id`,
+      [fx.workspaceId, fx.owner.id],
+      "test:privateMessage",
+    );
+    const messageReport = await call("POST", "/api/reports", {
+      token: tokenFor(student),
+      body: {
+        targetType: "MESSAGE",
+        targetId: message.id,
+        category: "HARASSMENT",
+        details: "This private message should not be probeable.",
+      },
+    });
+    assert.equal(messageReport.status, 404);
+
+    const resource = await queryOne(
+      `INSERT INTO resources
+         (workspace_id, uploaded_by, title, description, kind, visibility, extracted_text, extraction_status)
+       VALUES ($1, $2, 'Private note', '', 'NOTE', 'PRIVATE', 'private resource text', 'SKIPPED')
+       RETURNING id`,
+      [fx.workspaceId, fx.owner.id],
+      "test:privateResource",
+    );
+    const resourceReport = await call("POST", "/api/reports", {
+      token: tokenFor(student),
+      body: {
+        targetType: "RESOURCE",
+        targetId: resource.id,
+        category: "INAPPROPRIATE_CONTENT",
+        details: "This private resource should not be probeable.",
+      },
+    });
+    assert.equal(resourceReport.status, 404);
+  });
+
+  it("does not return a private message body in admin report detail", async () => {
+    const fx = await createGroupFixture();
+    const message = await queryOne(
+      `INSERT INTO messages (workspace_id, author_id, kind, body)
+       VALUES ($1, $2, 'TEXT', 'body must never be returned to report detail')
+       RETURNING id`,
+      [fx.workspaceId, fx.owner.id],
+      "test:messageForDetail",
+    );
+    const report = await queryOne(
+      `INSERT INTO reports (reporter_id, target_type, target_id, category, details)
+       VALUES ($1, 'MESSAGE', $2, 'HARASSMENT', 'message detail privacy test')
+       RETURNING id`,
+      [fx.member.id, message.id],
+      "test:detailReport",
+    );
+    createdReportIds.push(report.id);
+
+    const response = await call("GET", `/api/admin/reports/${report.id}`, { token: tokenFor(admin) });
+    assert.equal(response.status, 200);
+    assert.equal(response.body?.data?.target?.body, undefined);
+    assert.notEqual(response.body?.data?.target?.source, undefined);
+  });
+});
+
+describe("K. report moderation is target-bound and transactional", () => {
+  it("rejects an incompatible action without closing the report", async () => {
+    const fx = await createGroupFixture();
+    const report = await queryOne(
+      `INSERT INTO reports (reporter_id, target_type, target_id, category, details)
+       VALUES ($1, 'GROUP', $2, 'SPAM', 'incompatible report action test')
+       RETURNING id`,
+      [fx.member.id, fx.groupId],
+      "test:incompatibleReport",
+    );
+    createdReportIds.push(report.id);
+
+    const response = await call("POST", "/api/admin/reports/resolve", {
+      token: tokenFor(admin),
+      body: { reportId: report.id, status: "RESOLVED", action: "REMOVE_CONTENT" },
+    });
+    assert.equal(response.status, 422);
+    const row = await queryOne("SELECT status FROM reports WHERE id = $1", [report.id], "test:reportStillOpen");
+    assert.equal(row.status, "OPEN");
+  });
+
+  it("cannot suspend an administrator through report moderation", async () => {
+    const report = await queryOne(
+      `INSERT INTO reports (reporter_id, target_type, target_id, category, details)
+       VALUES ($1, 'STUDENT', $2, 'ABUSE', 'administrator suspension protection test')
+       RETURNING id`,
+      [student.id, admin.id],
+      "test:adminTargetReport",
+    );
+    createdReportIds.push(report.id);
+
+    const response = await call("POST", "/api/admin/reports/resolve", {
+      token: tokenFor(admin),
+      body: { reportId: report.id, status: "RESOLVED", action: "SUSPEND_USER" },
+    });
+    assert.equal(response.status, 403);
+    const row = await queryOne("SELECT status FROM users WHERE id = $1", [admin.id], "test:adminStillActive");
+    assert.equal(row.status, "ACTIVE");
+  });
+
+  it("leaves a report open when its requested content removal is no longer possible", async () => {
+    const fx = await createGroupFixture();
+    const message = await queryOne(
+      `INSERT INTO messages (workspace_id, author_id, kind, body)
+       VALUES ($1, $2, 'TEXT', 'content will disappear before moderation')
+       RETURNING id`,
+      [fx.workspaceId, fx.owner.id],
+      "test:staleMessage",
+    );
+    const report = await queryOne(
+      `INSERT INTO reports (reporter_id, target_type, target_id, category, details)
+       VALUES ($1, 'MESSAGE', $2, 'SPAM', 'stale content action test')
+       RETURNING id`,
+      [fx.member.id, message.id],
+      "test:staleReport",
+    );
+    createdReportIds.push(report.id);
+    await query("UPDATE messages SET deleted_at = now() WHERE id = $1", [message.id], "test:deleteBeforeModeration");
+
+    const response = await call("POST", "/api/admin/reports/resolve", {
+      token: tokenFor(admin),
+      body: { reportId: report.id, status: "RESOLVED", action: "REMOVE_CONTENT" },
+    });
+    assert.equal(response.status, 409);
+    const row = await queryOne("SELECT status FROM reports WHERE id = $1", [report.id], "test:staleReportOpen");
+    assert.equal(row.status, "OPEN");
+  });
+
+  it("delivers a warning notification before resolving a student report", async () => {
+    const target = await createUser(ROLES.STUDENT, "warn-target");
+    const report = await queryOne(
+      `INSERT INTO reports (reporter_id, target_type, target_id, category, details)
+       VALUES ($1, 'STUDENT', $2, 'ABUSE', 'warning notification delivery test')
+       RETURNING id`,
+      [student.id, target.id],
+      "test:warningReport",
+    );
+    createdReportIds.push(report.id);
+
+    const response = await call("POST", "/api/admin/reports/resolve", {
+      token: tokenFor(admin),
+      body: { reportId: report.id, status: "RESOLVED", action: "WARN_USER" },
+    });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+
+    const notification = await queryOne(
+      "SELECT type FROM notifications WHERE user_id = $1 AND metadata->>'source' IS NULL ORDER BY created_at DESC LIMIT 1",
+      [target.id],
+      "test:warningNotification",
+    );
+    assert.equal(notification?.type, "MODERATION");
+  });
+
+  it("archives the reported group when REMOVE_GROUP is requested", async () => {
+    const fx = await createGroupFixture();
+    const report = await queryOne(
+      `INSERT INTO reports (reporter_id, target_type, target_id, category, details)
+       VALUES ($1, 'GROUP', $2, 'SPAM', 'reported group removal test')
+       RETURNING id`,
+      [fx.member.id, fx.groupId],
+      "test:groupRemovalReport",
+    );
+    createdReportIds.push(report.id);
+
+    const response = await call("POST", "/api/admin/reports/resolve", {
+      token: tokenFor(admin),
+      body: { reportId: report.id, status: "RESOLVED", action: "REMOVE_GROUP" },
+    });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+
+    const state = await queryOne(
+      `SELECT g.status, w.is_archived, jr.status AS request_status
+         FROM study_groups g
+         JOIN workspaces w ON w.id = $2
+         LEFT JOIN study_group_join_requests jr ON jr.id = $3
+        WHERE g.id = $1`,
+      [fx.groupId, fx.workspaceId, fx.requestId],
+      "test:reportedGroupRemovalState",
+    );
+    assert.equal(state.status, "ARCHIVED");
+    assert.equal(state.is_archived, true);
+    assert.equal(state.request_status, "CANCELLED");
+  });
+});
+
+// ===========================================================================
+// L. admin edits revoke sessions and reset verification
+// ===========================================================================
+describe("L. administrator account changes invalidate sessions", () => {
+  it("revokes sessions on a role change", async () => {
+    const target = await createUser(ROLES.STUDENT, "role-edit");
+    const response = await call("POST", `/api/admin/users/${target.id}/role`, {
+      token: tokenFor(admin),
+      body: { role: ROLES.GROUP_LEADER, reason: "role session revocation test" },
+    });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+
+    const session = await queryOne("SELECT revoked_at FROM auth_sessions WHERE id = $1", [target.sessionId], "test:roleSession");
+    assert.ok(session.revoked_at);
+    const oldToken = await call("GET", "/api/students/me", { token: tokenFor(target) });
+    assert.equal(oldToken.status, 401);
+  });
+
+  it("resets email verification and revokes sessions on an email change", async () => {
+    const target = await createUser(ROLES.STUDENT, "email-edit");
+    const nextEmail = tag("email-edit-new");
+    const pendingToken = randomUUID();
+    await query(
+      `INSERT INTO auth_tokens (user_id, purpose, token_hash, expires_at)
+       VALUES ($1, 'EMAIL_CHANGE', $2, now() + interval '1 hour')`,
+      [target.id, pendingToken],
+      "test:pendingEmailChangeToken",
+    );
+    const response = await call("PATCH", `/api/admin/users/${target.id}`, {
+      token: tokenFor(admin),
+      body: { email: nextEmail },
+    });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+
+    const user = await queryOne(
+      "SELECT email, email_verified_at, status FROM users WHERE id = $1",
+      [target.id],
+      "test:emailChanged",
+    );
+    assert.equal(user.email, nextEmail);
+    assert.equal(user.email_verified_at, null);
+    assert.equal(user.status, "PENDING_VERIFICATION");
+
+    const session = await queryOne("SELECT revoked_at FROM auth_sessions WHERE id = $1", [target.sessionId], "test:emailSession");
+    assert.ok(session.revoked_at);
+    const invalidatedToken = await queryOne(
+      "SELECT consumed_at FROM auth_tokens WHERE token_hash = $1",
+      [pendingToken],
+      "test:emailChangeTokenConsumed",
+    );
+    assert.ok(invalidatedToken.consumed_at);
+    const oldToken = await call("GET", "/api/students/me", { token: tokenFor(target) });
+    assert.equal(oldToken.status, 401);
+  });
+
+  it("revokes sessions even when the legacy suspendSessions flag is false", async () => {
+    const target = await createUser(ROLES.STUDENT, "suspend-session");
+    const response = await call("POST", "/api/admin/users/suspend", {
+      token: tokenFor(admin),
+      body: { userId: target.id, reason: "session revocation test", suspendSessions: false },
+    });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    const session = await queryOne("SELECT revoked_at FROM auth_sessions WHERE id = $1", [target.sessionId], "test:suspendSession");
+    assert.ok(session.revoked_at);
+  });
+
+  it("rejects demoting the last active administrator", async () => {
+    const target = await createUser(ROLES.ADMIN, "last-admin-target");
+    await query(
+      "UPDATE users SET status = 'PENDING_VERIFICATION' WHERE id = $1",
+      [admin.id],
+      "test:makeAdminNonActive",
+    );
+
+    try {
+      const response = await call("POST", `/api/admin/users/${target.id}/role`, {
+        token: tokenFor(admin),
+        body: { role: ROLES.STUDENT, reason: "last admin protection test" },
+      });
+      assert.equal(response.status, 409, JSON.stringify(response.body));
+      const row = await queryOne(
+        `SELECT r.key AS role FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = $1`,
+        [target.id],
+        "test:lastAdminRole",
+      );
+      assert.equal(row.role, ROLES.ADMIN);
+    } finally {
+      await query(
+        "UPDATE users SET status = 'ACTIVE', email_verified_at = now() WHERE id = $1",
+        [admin.id],
+        "test:restoreAdminState",
+      );
+    }
   });
 });

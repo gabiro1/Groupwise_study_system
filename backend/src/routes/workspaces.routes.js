@@ -2,7 +2,8 @@ import { Router } from "express";
 import { asyncHandler, ok, created, noContent } from "../lib/http.js";
 import { validate } from "../middleware/validate.js";
 import { requireStudent, requireAuth } from "../middleware/auth.js";
-import { writeLimiter } from "../middleware/rateLimit.js";
+import { writeLimiter, uploadLimiter } from "../middleware/rateLimit.js";
+import { resourceUpload } from "../middleware/uploads.js";
 import * as workspace from "../services/workspace.service.js";
 import {
   workspaceIdParamSchema,
@@ -255,19 +256,63 @@ router.get(
   }),
 );
 
+router.get(
+  "/:workspaceId/resources/:resourceId/download",
+  validate({ params: z.object({ workspaceId: z.uuid(), resourceId: z.uuid() }) }),
+  asyncHandler(async (req, res, next) => {
+    try {
+      const file = await workspace.getResourceFile(req.params.workspaceId, req.params.resourceId, req.user.id);
+      res.setHeader("Content-Type", file.mimeType);
+      res.setHeader("Content-Length", String(file.size ?? 0));
+      return res.download(file.filePath, file.filename, (error) => {
+        if (error && !res.headersSent) next(error);
+      });
+    } catch (error) {
+      return next(error);
+    }
+  }),
+);
+
 router.post(
   "/:workspaceId/resources",
-  writeLimiter,
+  uploadLimiter,
+  resourceUpload.single("file"),
   validate({
     params: workspaceIdParamSchema,
-    body: createResourceSchema.refine((resource) => resource.kind !== "FILE", {
-      message: "File uploads are not available here yet. Add a link or a text note instead.",
-      path: ["kind"],
-    }),
+    body: createResourceSchema,
   }),
   asyncHandler(async (req, res) => {
-    const resource = await workspace.createResource(req.params.workspaceId, req.user.id, req.body);
+    const resource = await workspace.createResource(req.params.workspaceId, req.user.id, { ...req.body, file: req.file });
     return created(res, { resource });
+  }),
+);
+
+router.get(
+  "/:workspaceId/groups",
+  validate({ params: workspaceIdParamSchema }),
+  asyncHandler(async (req, res) => {
+    const groups = await workspace.getWorkspaceGroups(req.params.workspaceId, req.user.id);
+    return ok(res, { groups });
+  }),
+);
+
+router.post(
+  "/:workspaceId/groups/:groupId",
+  writeLimiter,
+  validate({ params: z.object({ workspaceId: z.uuid(), groupId: z.uuid() }) }),
+  asyncHandler(async (req, res) => {
+    const groups = await workspace.assignGroupToWorkspace(req.params.workspaceId, req.params.groupId, req.user.id);
+    return ok(res, { groups });
+  }),
+);
+
+router.delete(
+  "/:workspaceId/groups/:groupId",
+  writeLimiter,
+  validate({ params: z.object({ workspaceId: z.uuid(), groupId: z.uuid() }) }),
+  asyncHandler(async (req, res) => {
+    const groups = await workspace.unassignGroupFromWorkspace(req.params.workspaceId, req.params.groupId, req.user.id);
+    return ok(res, { groups });
   }),
 );
 

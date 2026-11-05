@@ -4,17 +4,30 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 
 async function apiRequest(path, options = {}) {
+  const isMultipart = typeof FormData !== "undefined" && options.body instanceof FormData;
   const response = await fetch(`/api/${path}`, {
     cache: "no-store",
     ...options,
     headers: {
-      ...(options.body ? { "content-type": "application/json" } : {}),
+      ...(options.body && !isMultipart ? { "content-type": "application/json" } : {}),
       ...options.headers,
     },
   });
   const result = response.status === 204 ? {} : await response.json();
   if (!response.ok) throw new Error(result.error?.message || "We couldn’t update this study workspace.");
   return result.data;
+}
+
+function WorkspaceSkeleton() {
+  return (
+    <div className="workspace-skeleton" role="status" aria-label="Loading study workspace">
+      <span className="sr-only">Loading your study workspace…</span>
+      <div className="workspace-skeleton-heading"><span /><span /><span /></div>
+      <div className="workspace-skeleton-tabs"><span /><span /><span /><span /><span /></div>
+      <div className="workspace-skeleton-grid"><span /><span /><span /></div>
+      <div className="workspace-skeleton-list"><span /><span /><span /><span /></div>
+    </div>
+  );
 }
 
 const tabs = ["Overview", "Plans & tasks", "Sessions", "Group chat", "Resources", "Ask AI", "Progress & feedback"];
@@ -54,7 +67,7 @@ export default function StudyWorkspace({ workspaceId, initialTab = "Overview", i
   const [taskForm, setTaskForm] = useState({ title: "", description: "", priority: "MEDIUM" });
   const [sessionForm, setSessionForm] = useState({ title: "", startsAt: "", endsAt: "", mode: "PHYSICAL", location: "", meetingUrl: "" });
   const [messageText, setMessageText] = useState("");
-  const [resourceForm, setResourceForm] = useState({ title: "", description: "", kind: "LINK", externalUrl: "", content: "", visibility: "GROUP" });
+  const [resourceForm, setResourceForm] = useState({ title: "", description: "", kind: "LINK", externalUrl: "", content: "", visibility: "GROUP", file: null });
   const [progressForm, setProgressForm] = useState({ topicId: "", status: "LEARNING", confidence: "0.5" });
   const [feedbackForm, setFeedbackForm] = useState({
     goalsCompatible: 3,
@@ -132,7 +145,7 @@ export default function StudyWorkspace({ workspaceId, initialTab = "Overview", i
     setError("");
     setNotice("");
     try {
-      await apiRequest(path, { method: "POST", body: JSON.stringify(body) });
+      await apiRequest(path, { method: "POST", body: body instanceof FormData ? body : JSON.stringify(body) });
       setNotice(successMessage);
       await refresh();
       return true;
@@ -251,14 +264,16 @@ export default function StudyWorkspace({ workspaceId, initialTab = "Overview", i
 
   async function createResource(event) {
     event.preventDefault();
-    const saved = await submit(`workspaces/${workspaceId}/resources`, {
-      title: resourceForm.title,
-      description: resourceForm.description,
-      kind: resourceForm.kind,
-      visibility: resourceForm.visibility,
-      ...(resourceForm.kind === "LINK" ? { externalUrl: resourceForm.externalUrl } : { content: resourceForm.content }),
-    }, "Resource shared with your group.");
-    if (saved) setResourceForm({ title: "", description: "", kind: "LINK", externalUrl: "", content: "", visibility: "GROUP" });
+    const body = new FormData();
+    body.append("title", resourceForm.title);
+    body.append("description", resourceForm.description);
+    body.append("kind", resourceForm.kind);
+    body.append("visibility", resourceForm.visibility);
+    if (resourceForm.kind === "LINK") body.append("externalUrl", resourceForm.externalUrl);
+    if (resourceForm.kind === "NOTE") body.append("content", resourceForm.content);
+    if (resourceForm.kind === "FILE" && resourceForm.file) body.append("file", resourceForm.file);
+    const saved = await submit(`workspaces/${workspaceId}/resources`, body, "Resource shared with your group.");
+    if (saved) setResourceForm({ title: "", description: "", kind: "LINK", externalUrl: "", content: "", visibility: "GROUP", file: null });
   }
 
   async function askAi(event) {
@@ -332,7 +347,7 @@ export default function StudyWorkspace({ workspaceId, initialTab = "Overview", i
   return (
     <section className="section-page workspace-page">
       <Link className="back-link" href="/dashboard/groups">← My study groups</Link>
-      {loading && !overview ? <p className="empty-state" role="status">Loading your group workspace…</p> : null}
+      {loading && !overview ? <WorkspaceSkeleton /> : null}
       {error && <div className="feature-error" role="alert">{error}<button type="button" onClick={refresh}>Try again</button></div>}
       {notice && <div className="feature-success" role="status">{notice}</div>}
       {overview && (
@@ -458,15 +473,17 @@ export default function StudyWorkspace({ workspaceId, initialTab = "Overview", i
             <div className="workspace-columns">
               <section className="panel feature-form">
                 <h2>Share a study resource</h2>
-                <p className="feature-muted">Add a useful link or a text note for your group. File uploads are not available yet.</p>
+                <p className="feature-muted">Share a useful link, note, or file with your group.</p>
                 <form className="feature-form-grid" onSubmit={createResource}>
                   <label className="form-span">Title<input required maxLength={160} value={resourceForm.title} onChange={(event) => setResourceForm({ ...resourceForm, title: event.target.value })} /></label>
-                  <label>Resource type<select value={resourceForm.kind} onChange={(event) => setResourceForm({ ...resourceForm, kind: event.target.value })}><option value="LINK">Web link</option><option value="NOTE">Text note</option></select></label>
+                  <label>Resource type<select value={resourceForm.kind} onChange={(event) => setResourceForm({ ...resourceForm, kind: event.target.value, file: null })}><option value="LINK">Web link</option><option value="NOTE">Text note</option><option value="FILE">Upload file</option></select></label>
                   <label>Visibility<select value={resourceForm.visibility} onChange={(event) => setResourceForm({ ...resourceForm, visibility: event.target.value })}><option value="GROUP">Group</option><option value="PRIVATE">Only me</option></select></label>
                   <label className="form-span">Description<textarea rows={2} maxLength={500} value={resourceForm.description} onChange={(event) => setResourceForm({ ...resourceForm, description: event.target.value })} /></label>
                   {resourceForm.kind === "LINK"
                     ? <label className="form-span">URL<input required type="url" maxLength={1000} value={resourceForm.externalUrl} onChange={(event) => setResourceForm({ ...resourceForm, externalUrl: event.target.value })} placeholder="https://" /></label>
-                    : <label className="form-span">Note content<textarea required rows={5} maxLength={500} value={resourceForm.content} onChange={(event) => setResourceForm({ ...resourceForm, content: event.target.value })} /></label>}
+                    : resourceForm.kind === "NOTE"
+                      ? <label className="form-span">Note content<textarea required rows={5} maxLength={50000} value={resourceForm.content} onChange={(event) => setResourceForm({ ...resourceForm, content: event.target.value })} /></label>
+                      : <label className="form-span">File<input required type="file" onChange={(event) => setResourceForm({ ...resourceForm, file: event.target.files?.[0] || null })} /><small className="feature-muted">PDF, documents, spreadsheets, images, TXT or CSV · up to 10 MB</small></label>}
                   <button className="button button-primary" disabled={busy}>Share resource</button>
                 </form>
               </section>
@@ -484,6 +501,7 @@ export default function StudyWorkspace({ workspaceId, initialTab = "Overview", i
                     {resource.description && <p>{resource.description}</p>}
                     {url && <a className="resource-link" href={url} target="_blank" rel="noopener noreferrer">{url}</a>}
                     {resource.kind === "NOTE" && resource.content && <p className="resource-note">{resource.content}</p>}
+                    {resource.kind === "FILE" && <a className="resource-link" href={`/api/workspaces/${workspaceId}/resources/${resource.id}/download`}>Download {resource.original_filename || "file"}</a>}
                   </article>;
                   })}
                 </div>

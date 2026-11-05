@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { backendUrl } from "../../backend-url";
 import { forwardSetCookies } from "../../cookies";
 import { applySetCookies, refreshSession } from "../refresh-session";
-
-const backendUrl = (process.env.BACKEND_API_URL || "http://localhost:4000").replace(/\/+$/, "");
 
 export async function GET(request) {
   const cookieStore = await cookies();

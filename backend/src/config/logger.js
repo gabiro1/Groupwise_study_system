@@ -5,7 +5,7 @@ const LEVELS = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
 /**
  * Keys that must never be written to logs, even if they appear on an object.
  */
-const REDACTED_KEYS = new Set([
+const REDACTED_KEY_PARTS = new Set([
   "password",
   "newpassword",
   "currentpassword",
@@ -13,7 +13,7 @@ const REDACTED_KEYS = new Set([
   "token",
   "accesstoken",
   "refreshtoken",
-  "resetToken",
+  "resettoken",
   "emailtoken",
   "authorization",
   "cookie",
@@ -21,7 +21,17 @@ const REDACTED_KEYS = new Set([
   "ai_api_key",
   "secret",
   "sessionid",
+  "privatekey",
+  "credential",
+  "csrf",
 ]);
+
+function isRedactedKey(key) {
+  const normalised = String(key).replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return [...REDACTED_KEY_PARTS].some((part) =>
+    normalised.includes(part.replace(/[^a-z0-9]/gi, "").toLowerCase()),
+  );
+}
 
 const SENSITIVE_PATTERNS = [
   { pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, replace: "[email]" },
@@ -49,7 +59,7 @@ export function redact(value, depth = 0) {
   if (typeof value === "object") {
     const out = {};
     for (const [key, item] of Object.entries(value)) {
-      out[key] = REDACTED_KEYS.has(key.toLowerCase()) ? "[redacted]" : redact(item, depth + 1);
+      out[key] = isRedactedKey(key) ? "[redacted]" : redact(item, depth + 1);
     }
     return out;
   }

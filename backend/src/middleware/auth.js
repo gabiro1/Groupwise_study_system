@@ -5,6 +5,7 @@ import {
   AccountSuspendedError,
   ForbiddenError,
   EmailNotVerifiedError,
+  NotFoundError,
 } from "../lib/errors.js";
 import logger from "../config/logger.js";
 
@@ -47,6 +48,22 @@ export async function loadUser(userId) {
 }
 
 /**
+ * Access JWTs are intentionally short-lived, but their session id still needs
+ * to be checked so an administrator's revocation takes effect immediately.
+ * Tokens issued by this service always carry a persisted session id.
+ */
+export async function loadActiveSession(sessionId, userId) {
+  if (!sessionId || !userId) return null;
+  return queryOne(
+    `SELECT id
+       FROM auth_sessions
+      WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL AND expires_at > now()`,
+    [sessionId, userId],
+    "auth:activeSession",
+  );
+}
+
+/**
  * Require a valid access token. Populates `req.user` and `req.sessionId`.
  */
 export async function requireAuth(req, _res, next) {
@@ -60,6 +77,9 @@ export async function requireAuth(req, _res, next) {
 
     if (!user) throw new AuthenticationError("Your account is no longer available.");
     if (user.status === "SUSPENDED" || user.status === "DEACTIVATED") throw new AccountSuspendedError();
+    if (!(await loadActiveSession(payload.sid, user.id))) {
+      throw new AuthenticationError("Your session is no longer valid. Please sign in again.");
+    }
 
     req.user = user;
     req.sessionId = payload.sid;
@@ -80,7 +100,7 @@ export async function optionalAuth(req, _res, next) {
   try {
     const payload = verifyAccessToken(token);
     const user = await loadUser(payload.sub);
-    if (user && user.status === "ACTIVE") {
+    if (user && user.status === "ACTIVE" && (await loadActiveSession(payload.sid, user.id))) {
       req.user = user;
       req.sessionId = payload.sid;
     }
@@ -134,8 +154,62 @@ export function requireRole(...allowedRoles) {
 export const requireStudent = requireRole("STUDENT", "GROUP_LEADER");
 export const requireAdmin = requireRole("ADMIN");
 
+/** Group-leader-only surfaces (leader tools, leader analytics). */
+export const requireGroupLeader = requireRole("GROUP_LEADER");
+
 /** Staff = administrators. Group leaders are students with extra group duties. */
 export const requireStaff = requireRole("ADMIN");
+
+/**
+ * Authorise access to one study group.
+ *
+ * The group id is always read from the route params (never from a body field the
+ * client could point at a group they do not belong to). Access is re-derived
+ * from `study_group_members` on every request.
+ *
+ * @param {{param?:string, requireLeader?:boolean}} [options]
+ *   `param` names the route parameter holding the group id (default `groupId`).
+ *   `requireLeader` restricts access to the group's OWNER/MODERATOR (admins still
+ *   pass, so the same guard can serve admin endpoints).
+ */
+export function authorizeGroupAccess({ param = "groupId", requireLeader = false } = {}) {
+  return async function groupGuard(req, _res, next) {
+    try {
+      if (!req.user) throw new AuthenticationError();
+
+      // Admins oversee every group; the administrative routes apply their own
+      // role guard, so allowing them here keeps the guard reusable.
+      if (req.user.role === "ADMIN") return next();
+
+      const groupId = req.params?.[param];
+      if (!groupId) throw new NotFoundError("That group");
+
+      const membership = await queryOne(
+        `SELECT m.role, g.status
+           FROM study_group_members m
+           JOIN study_groups g ON g.id = m.group_id
+          WHERE m.group_id = $1 AND m.student_id = $2 AND m.left_at IS NULL
+            AND m.status = 'ACTIVE' AND g.status = 'ACTIVE'`,
+        [groupId, req.user.id],
+        "auth:groupMembership",
+      );
+
+      // A non-member gets the same answer as a missing group: membership must not
+      // be probeable by iterating ids.
+      if (!membership) throw new NotFoundError("That group");
+
+      if (requireLeader && !["OWNER", "MODERATOR"].includes(membership.role)) {
+        throw new ForbiddenError("Only the group's leaders can do that.");
+      }
+
+      req.groupMembership = membership;
+      req.groupId = groupId;
+      return next();
+    } catch (error) {
+      return next(error);
+    }
+  };
+}
 
 /**
  * Require a verified email address. Used for actions where an unverified
@@ -153,8 +227,11 @@ export default {
   optionalAuth,
   requireRole,
   requireStudent,
+  requireGroupLeader,
   requireAdmin,
   requireStaff,
+  authorizeGroupAccess,
   requireVerifiedEmail,
   loadUser,
+  loadActiveSession,
 };

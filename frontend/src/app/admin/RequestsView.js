@@ -150,7 +150,7 @@ export default function RequestsView() {
         topic: {
           courseId: values.courseId,
           name: (values.name || "").trim() || target.title,
-          description: (values.description || "").trim() || null,
+          description: (values.description || "").trim(),
         },
       };
     }
@@ -159,9 +159,9 @@ export default function RequestsView() {
         courseCode: (values.courseCode || "").trim(),
         name: (values.name || "").trim() || target.title,
         departmentId: values.departmentId || null,
-        description: (values.description || "").trim() || null,
-        creditHours: values.creditHours ? Number(values.creditHours) : null,
-        level: values.level ? Number(values.level) : null,
+        description: (values.description || "").trim(),
+        creditHours: values.creditHours === "" || values.creditHours == null ? null : Number(values.creditHours),
+        level: values.level === "" || values.level == null ? null : Number(values.level),
       },
     };
   }
@@ -175,6 +175,18 @@ export default function RequestsView() {
     if (approveTarget.kind === "COURSE" && !(values.courseCode || "").trim()) {
       setFormError("Enter the course code.");
       return;
+    }
+    if (approveTarget.kind === "COURSE") {
+      const level = values.level === "" || values.level == null ? null : Number(values.level);
+      const creditHours = values.creditHours === "" || values.creditHours == null ? null : Number(values.creditHours);
+      if (level != null && (!Number.isInteger(level) || level < 100 || level > 900)) {
+        setFormError("Level must be a whole number from 100 to 900.");
+        return;
+      }
+      if (creditHours != null && (!Number.isInteger(creditHours) || creditHours < 1 || creditHours > 12)) {
+        setFormError("Credit hours must be a whole number from 1 to 12.");
+        return;
+      }
     }
     setBusy(true);
     setFormError("");
@@ -438,8 +450,10 @@ export default function RequestsView() {
                 <span>Level</span>
                 <input
                   type="number"
-                  min="1"
-                  max="8"
+                  min="100"
+                  max="900"
+                  step="100"
+                  placeholder="e.g. 200"
                   value={form.level ?? ""}
                   onChange={(event) => setForm((current) => ({ ...current, level: event.target.value }))}
                 />

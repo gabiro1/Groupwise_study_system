@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
+import { backendUrl } from "../backend-url";
 
-const backendUrl = (process.env.BACKEND_API_URL || "http://localhost:4000").replace(/\/+$/, "");
 const refreshOperations = new Map();
 const completedRefreshCacheMs = 5_000;
 

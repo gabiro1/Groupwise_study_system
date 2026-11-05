@@ -9,37 +9,63 @@ import logger from "../config/logger.js";
  *
  *  1. Never log credentials. Callers pass an explicit metadata object, and this
  *     module refuses to serialise known-sensitive keys even if a caller slips.
- *  2. Audit writes must never break the request. A failure here is logged as an
- *     error and swallowed — losing an audit row is bad, but returning a 500 to a
- *     student who just completed an action is worse.
+ *  2. Ordinary audit writes must never break the request. A failure here is
+ *     logged and swallowed. Transaction-scoped and explicitly required writes
+ *     are different: their callers have declared the audit trail load-bearing.
  */
 
-const FORBIDDEN_KEYS = new Set([
+const FORBIDDEN_KEY_PARTS = [
   "password",
-  "newPassword",
-  "currentPassword",
-  "passwordHash",
+  "passwordhash",
   "token",
-  "refreshToken",
-  "accessToken",
+  "apikey",
+  "accesskey",
+  "secretkey",
   "authorization",
   "cookie",
   "secret",
-  "apiKey",
-]);
+  "credential",
+  "privatekey",
+  "csrf",
+  "sessionid",
+  "jwt",
+];
 
-function sanitiseMetadata(metadata) {
-  if (!metadata || typeof metadata !== "object") return {};
-  const out = {};
-  for (const [key, value] of Object.entries(metadata)) {
-    if (FORBIDDEN_KEYS.has(key)) continue;
-    if (typeof value === "string" && value.length > 500) {
-      out[key] = `${value.slice(0, 500)}…`;
-      continue;
-    }
-    out[key] = value;
+function isForbiddenKey(key) {
+  const normalised = String(key).replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return FORBIDDEN_KEY_PARTS.some((part) => normalised.includes(part));
+}
+
+function sanitiseValue(value, seen, depth) {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    if (typeof value === "string" && value.length > 500) return `${value.slice(0, 500)}...`;
+    return value;
   }
-  return out;
+  if (typeof value === "bigint") return String(value);
+  if (value === undefined || typeof value === "function" || typeof value === "symbol") return null;
+  if (value instanceof Date) return value.toISOString();
+  if (depth >= 8) return "[truncated]";
+  if (seen.has(value)) return "[circular]";
+
+  seen.add(value);
+  let result;
+  if (Array.isArray(value)) {
+    result = value.map((entry) => sanitiseValue(entry, seen, depth + 1));
+  } else {
+    result = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (isForbiddenKey(key)) continue;
+      result[key] = sanitiseValue(entry, seen, depth + 1);
+    }
+  }
+  seen.delete(value);
+  return result;
+}
+
+/** Remove sensitive values at every nesting level before JSON serialisation. */
+export function sanitiseMetadata(metadata) {
+  if (!metadata || typeof metadata !== "object") return {};
+  return sanitiseValue(metadata, new WeakSet(), 0);
 }
 
 /**
@@ -50,19 +76,44 @@ function sanitiseMetadata(metadata) {
  * @param {object} [event.metadata]
  * @param {object} [event.actor]       req.user
  * @param {object} [event.req]         used for ip / user-agent only
+ * @param {string} [event.outcome]     'SUCCESS' | 'FAILURE' | 'PARTIAL'. Defaults to
+ *   'SUCCESS'. An audit row is immutable, so this is written once at insert.
+ * @param {boolean} [event.required]   Re-throw an audit failure even without a
+ *   transaction. Use for critical administrative changes that cannot be silently
+ *   accepted without a trace.
  * @param {object} [event.tx]          transaction-scoped query runner. When given,
  *   the audit row commits or rolls back with the action it describes, which is
  *   what administrative mutations want: an admin action without its audit trail
  *   should not exist.
+ * @param {object} [options]           legacy call shape: `recordAudit(event, { tx })`.
+ *   Both forms are accepted because older route modules pass the transaction
+ *   separately; ignoring it silently would leave audit rows behind on rollback.
+ *   `required: true` is also accepted for non-transactional critical events.
  */
-export async function recordAudit({ action, entityType, entityId, metadata, actor, req, tx }) {
+export async function recordAudit(
+  {
+    action,
+    entityType,
+    entityId,
+    metadata,
+    actor,
+    req,
+    outcome = "SUCCESS",
+    required = false,
+    tx,
+  },
+  options = {},
+) {
+  const transaction = tx ?? options?.tx ?? null;
+  const mustSucceed = transaction || required || options?.required === true;
   try {
-    const run = tx ?? { query };
+    const run = transaction ?? { query };
+    const safeOutcome = ["SUCCESS", "FAILURE", "PARTIAL"].includes(outcome) ? outcome : "SUCCESS";
 
     await run.query(
       `INSERT INTO audit_logs
-         (actor_id, actor_role, action, entity_type, entity_id, metadata, ip_address, user_agent)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)`,
+         (actor_id, actor_role, action, entity_type, entity_id, metadata, outcome, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)`,
       [
         actor?.id ?? null,
         actor?.role ?? null,
@@ -70,15 +121,17 @@ export async function recordAudit({ action, entityType, entityId, metadata, acto
         entityType,
         entityId ?? null,
         JSON.stringify(sanitiseMetadata(metadata)),
+        safeOutcome,
         req?.ip ?? null,
         req?.get?.("user-agent")?.slice(0, 300) ?? null,
       ],
       "audit:insert",
     );
   } catch (error) {
-    // Deliberately non-fatal when there is no surrounding transaction, so a
-    // logging failure cannot fail a student's request. Inside a transaction the
-    // error still propagates: rolling back is the caller's intent.
+    // Deliberately non-fatal for ordinary events, so a logging failure cannot
+    // fail a student's request. Transactional and explicitly required events
+    // propagate: rolling back or surfacing the action failure is the caller's
+    // intent.
     logger.error("Failed to write audit log", {
       action,
       entityType,
@@ -86,7 +139,7 @@ export async function recordAudit({ action, entityType, entityId, metadata, acto
       message: error.message,
     });
 
-    if (tx) throw error;
+    if (mustSucceed) throw error;
   }
 }
 
@@ -117,6 +170,7 @@ export const AUDIT = Object.freeze({
   COURSE_CREATED: "admin.course.created",
   COURSE_UPDATED: "admin.course.updated",
   COURSE_ARCHIVED: "admin.course.archived",
+  COURSE_DELETED: "admin.course.deleted",
   TOPIC_CREATED: "admin.topic.created",
   TOPIC_UPDATED: "admin.topic.updated",
   SKILL_CREATED: "admin.skill.created",
@@ -130,6 +184,7 @@ export const AUDIT = Object.freeze({
   REPORT_ACTIONED: "admin.report.actioned",
 
   SETTINGS_UPDATED: "admin.settings.updated",
+  SETTING_DELETED: "admin.setting.deleted",
   WEIGHTS_UPDATED: "admin.recommendation.weights.updated",
 
   GROUP_CREATED: "group.created",
@@ -144,8 +199,28 @@ export const AUDIT = Object.freeze({
 
   GROUP_LEADER_ASSIGNED: "admin.group_leader.assigned",
   GROUP_LEADER_REMOVED: "admin.group_leader.removed",
+  GROUP_SUSPENDED: "admin.group.suspended",
+  GROUP_RESTORED: "admin.group.restored",
+  GROUP_ARCHIVED_BY_ADMIN: "admin.group.archived",
+  GROUP_MEMBER_REMOVED_BY_ADMIN: "admin.group.member.removed",
+  SESSION_CANCELLED: "admin.session.cancelled",
+
+  ANNOUNCEMENT_CREATED: "admin.announcement.created",
+  ANNOUNCEMENT_UPDATED: "admin.announcement.updated",
+  ANNOUNCEMENT_PUBLISHED: "admin.announcement.published",
+  ANNOUNCEMENT_ARCHIVED: "admin.announcement.archived",
+  ANNOUNCEMENT_DELETED: "admin.announcement.deleted",
   ANNOUNCEMENT_SENT: "admin.announcement.sent",
+
+  AI_CONFIG_UPDATED: "admin.ai.config.updated",
   AI_PROVIDER_RESET: "admin.ai.provider.reset",
+  AI_PROVIDER_TESTED: "admin.ai.provider.tested",
+
+  ADMIN_BOOTSTRAP: "admin.bootstrap.created",
+  USER_UPDATED_BY_ADMIN: "admin.user.updated",
+
+  MAINTENANCE_ENABLED: "admin.maintenance.enabled",
+  MAINTENANCE_DISABLED: "admin.maintenance.disabled",
 
   RESOURCE_DELETED: "resource.deleted",
   MODERATION_MESSAGE_REMOVED: "moderation.message.removed",
@@ -154,4 +229,4 @@ export const AUDIT = Object.freeze({
   AI_MESSAGE_ADDED: "ai.message.added",
 });
 
-export default { recordAudit, AUDIT };
+export default { recordAudit, AUDIT, sanitiseMetadata };

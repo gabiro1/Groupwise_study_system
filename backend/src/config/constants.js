@@ -116,6 +116,8 @@ export const GROUP_STATUS = Object.freeze({
   ACTIVE: "ACTIVE",
   ARCHIVED: "ARCHIVED",
   DISBANDED: "DISBANDED",
+  /** Administrative hold: the group is paused and can be restored. */
+  SUSPENDED: "SUSPENDED",
 });
 
 export const GROUP_MEMBER_ROLE = Object.freeze({
@@ -302,7 +304,59 @@ export const REPORT_CATEGORY = Object.freeze({
   SPAM: "SPAM",
   ACADEMIC_DISHONESTY: "ACADEMIC_DISHONESTY",
   IMPERSONATION: "IMPERSONATION",
+  ABUSE: "ABUSE",
   OTHER: "OTHER",
+});
+
+/**
+ * Platform announcements.
+ *
+ * An announcement is a draft/schedule record; delivery goes through the existing
+ * notification pipeline, so there is no second delivery system. `audience`
+ * mirrors the notification audience vocabulary.
+ */
+export const ANNOUNCEMENT_CATEGORY = Object.freeze({
+  GENERAL: "GENERAL",
+  ACADEMIC: "ACADEMIC",
+  MAINTENANCE: "MAINTENANCE",
+  SECURITY: "SECURITY",
+  PLATFORM_UPDATE: "PLATFORM_UPDATE",
+});
+
+export const ANNOUNCEMENT_AUDIENCE = Object.freeze({
+  ALL: "ALL",
+  STUDENTS: "STUDENTS",
+  GROUP_LEADERS: "GROUP_LEADERS",
+  ADMINS: "ADMINS",
+});
+
+export const ANNOUNCEMENT_STATUS = Object.freeze({
+  DRAFT: "DRAFT",
+  SCHEDULED: "SCHEDULED",
+  PUBLISHED: "PUBLISHED",
+  ARCHIVED: "ARCHIVED",
+});
+
+/** AI features recorded in usage telemetry. */
+export const AI_USAGE_FEATURE = Object.freeze({
+  ASSISTANT: "ASSISTANT",
+  MATCHING: "MATCHING",
+  INTENT: "INTENT",
+  SUMMARY: "SUMMARY",
+  OTHER: "OTHER",
+});
+
+export const AI_USAGE_STATUS = Object.freeze({
+  SUCCESS: "SUCCESS",
+  FAILURE: "FAILURE",
+  SKIPPED: "SKIPPED",
+});
+
+/** Outcomes recorded on an immutable audit row. */
+export const AUDIT_OUTCOME = Object.freeze({
+  SUCCESS: "SUCCESS",
+  FAILURE: "FAILURE",
+  PARTIAL: "PARTIAL",
 });
 
 /** Day-of-week convention: 0 = Sunday, matching `Date#getDay()`. */

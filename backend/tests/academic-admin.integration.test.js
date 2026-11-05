@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import "./test-database.js";
 
 /**
  * Admin academic-taxonomy CRUD — HTTP integration tests.
@@ -15,26 +16,6 @@ import { randomUUID } from "node:crypto";
 
 const RUN = randomUUID().slice(0, 8);
 
-const rawDatabaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
-if (!rawDatabaseUrl) {
-  throw new Error("These tests require DATABASE_URL or TEST_DATABASE_URL to be set.");
-}
-
-function toTestDatabaseUrl(url) {
-  try {
-    const parsed = new URL(url);
-    const dbName = parsed.pathname.replace(/^\//, "");
-    if (!dbName || /_test$/.test(dbName)) return url;
-    parsed.pathname = `/${dbName}_test`;
-    return parsed.toString();
-  } catch {
-    return url;
-  }
-}
-
-process.env.NODE_ENV = "test";
-process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || toTestDatabaseUrl(rawDatabaseUrl);
-process.env.AUTH_SECRET = process.env.TEST_AUTH_SECRET || "integration-test-auth-secret-0123456789abcdef";
 process.env.RATE_LIMIT_MAX = "100000";
 process.env.AUTH_RATE_LIMIT_MAX = "100000";
 process.env.SEARCH_RATE_LIMIT_MAX = "100000";
@@ -87,7 +68,14 @@ async function createUser(roleKey, label) {
     "test:createUser",
   );
   createdEmails.push(email);
-  const token = signAccessToken({ userId: id, role: roleKey, roleId: role.id, sessionId: randomUUID(), email, name: label });
+  const sessionId = randomUUID();
+  await query(
+    `INSERT INTO auth_sessions (id, user_id, refresh_token_hash, expires_at)
+     VALUES ($1, $2, $3, now() + interval '1 day')`,
+    [sessionId, id, `test-session-${sessionId}`],
+    "test:createSession",
+  );
+  const token = signAccessToken({ userId: id, role: roleKey, roleId: role.id, sessionId, email, name: label });
   return { id, email, token, role: roleKey };
 }
 

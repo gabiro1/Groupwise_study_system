@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-
-const backendUrl = (process.env.BACKEND_API_URL || "http://localhost:4000").replace(/\/+$/, "");
+import { backendUrl } from "../backend-url";
 
 async function forward(request, method) {
   const cookie = request.headers.get("cookie") || "";

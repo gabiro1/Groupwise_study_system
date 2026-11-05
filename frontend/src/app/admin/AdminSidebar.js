@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { apiRequest, displayName, initialsFor } from "./adminApi";
 import {
   BookOpenIcon,
+  CalendarIcon,
   CapIcon,
   ChartIcon,
   ChevronDownIcon,
@@ -16,19 +17,52 @@ import {
   NetworkIcon,
   SettingsIcon,
   ShieldIcon,
+  SparklesIcon,
   UsersIcon,
+  UserCheckIcon,
+  ClockIcon,
 } from "./AdminIcons";
 
-const NAV = [
-  { href: "/admin", label: "Dashboard", icon: DashboardIcon, exact: true },
-  { href: "/admin/users", label: "Users", icon: UsersIcon },
-  { href: "/admin/academic", label: "Academic Data", icon: BookOpenIcon },
-  { href: "/admin/requests", label: "Catalogue Requests", icon: InboxIcon },
-  { href: "/admin/groups", label: "Study Groups", icon: NetworkIcon },
-  { href: "/admin/reports", label: "Reports & Moderation", icon: ShieldIcon },
-  { href: "/admin/matching", label: "Matching Analytics", icon: ChartIcon },
-  { href: "/admin/audit", label: "Audit Logs", icon: ClipboardIcon },
-  { href: "/admin/settings", label: "Settings", icon: SettingsIcon },
+const SECTIONS = [
+  {
+    label: "OVERVIEW",
+    items: [
+      { href: "/admin", label: "Dashboard", icon: DashboardIcon, exact: true },
+    ],
+  },
+  {
+    label: "USER MANAGEMENT",
+    items: [
+      { href: "/admin/users", label: "Users", icon: UsersIcon },
+      { href: "/admin/roles", label: "Roles & Permissions", icon: UserCheckIcon },
+    ],
+  },
+  {
+    label: "ACADEMIC MANAGEMENT",
+    items: [
+      { href: "/admin/academic", label: "Courses", icon: BookOpenIcon },
+      { href: "/admin/requests", label: "Catalogue Requests", icon: InboxIcon },
+      { href: "/admin/groups", label: "Study Groups", icon: NetworkIcon },
+      { href: "/admin/sessions", label: "Study Sessions", icon: CalendarIcon },
+    ],
+  },
+  {
+    label: "PLATFORM MANAGEMENT",
+    items: [
+      { href: "/admin/ai", label: "AI Configuration", icon: SparklesIcon },
+      { href: "/admin/announcements", label: "Announcements", icon: InboxIcon },
+      { href: "/admin/reports", label: "Reports & Moderation", icon: ShieldIcon },
+    ],
+  },
+  {
+    label: "SYSTEM",
+    items: [
+      { href: "/admin/matching", label: "Analytics & Reports", icon: ChartIcon },
+      { href: "/admin/audit", label: "Security & Audit Logs", icon: ClipboardIcon },
+      { href: "/admin/system", label: "System Monitoring", icon: ClockIcon },
+      { href: "/admin/settings", label: "Settings", icon: SettingsIcon },
+    ],
+  },
 ];
 
 export default function AdminSidebar({ user, system, onNavigate }) {
@@ -106,6 +140,9 @@ export default function AdminSidebar({ user, system, onNavigate }) {
 
         {profileOpen && (
           <div className="admin-profile-menu" role="menu">
+            <Link href="/admin/profile" role="menuitem" onClick={onNavigate}>
+              <UserCheckIcon size={15} /> Admin profile
+            </Link>
             <Link href="/admin/settings" role="menuitem" onClick={onNavigate}>
               <SettingsIcon size={15} /> Account settings
             </Link>
@@ -118,22 +155,27 @@ export default function AdminSidebar({ user, system, onNavigate }) {
       </div>
 
       <nav className="admin-nav" aria-label="Admin sections">
-        {NAV.map((item) => {
-          const Icon = item.icon;
-          const active = isActive(item);
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              onClick={onNavigate}
-              className={`admin-nav-link${active ? " is-active" : ""}`}
-              aria-current={active ? "page" : undefined}
-            >
-              <Icon size={18} />
-              <span>{item.label}</span>
-            </Link>
-          );
-        })}
+        {SECTIONS.map((section) => (
+          <div key={section.label} className="admin-nav-section">
+            <span className="admin-nav-section-label">{section.label}</span>
+            {section.items.map((item) => {
+              const Icon = item.icon;
+              const active = isActive(item);
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  onClick={onNavigate}
+                  className={`admin-nav-link${active ? " is-active" : ""}`}
+                  aria-current={active ? "page" : undefined}
+                >
+                  <Icon size={18} />
+                  <span>{item.label}</span>
+                </Link>
+              );
+            })}
+          </div>
+        ))}
       </nav>
 
       <div className="admin-sidebar-foot">

@@ -850,7 +850,24 @@ async function seedDemoGroup(ids, { courses, topics, goals }) {
       [groupId],
       "seed:workspace",
     );
-    const workspaceId = workspace.rows[0]?.id;
+    let workspaceId = workspace.rows[0]?.id;
+    if (!workspaceId) {
+      const createdWorkspace = await tx.query(
+        `INSERT INTO workspaces (group_id, name, description, created_by)
+         VALUES ($1, 'Database Systems Exam Prep — Workspace', '', $2)
+         RETURNING id`,
+        [groupId, ownerId],
+        "seed:createWorkspace",
+      );
+      workspaceId = createdWorkspace.rows[0].id;
+      await tx.query(
+        `INSERT INTO workspace_groups (workspace_id, group_id, assigned_by)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (workspace_id, group_id) DO NOTHING`,
+        [workspaceId, groupId, ownerId],
+        "seed:workspaceGroup",
+      );
+    }
     if (workspaceId) {
       for (const [studentId, joinedVia] of [
         [ownerId, "DIRECT"],

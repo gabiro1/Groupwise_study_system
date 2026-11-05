@@ -900,6 +900,21 @@ export const recommendationFeedbackSchema = z.object({
   comment: shortText.max(600).optional().nullable(),
 });
 
+export const recommendationWeightsSchema = z
+  .object({
+    course: z.coerce.number().min(0).max(1),
+    skills: z.coerce.number().min(0).max(1),
+    goals: z.coerce.number().min(0).max(1),
+    availability: z.coerce.number().min(0).max(1),
+    preferences: z.coerce.number().min(0).max(1),
+    topics: z.coerce.number().min(0).max(1),
+  })
+  .strict()
+  .refine(
+    (weights) => Math.abs(Object.values(weights).reduce((sum, value) => sum + value, 0) - 1) <= 0.001,
+    { message: "Recommendation weights must sum to 1." },
+  );
+
 export const aiChatSchema = z.object({
   workspaceId: uuid.optional().nullable(),
   message: z.string().trim().min(1, "Ask a question.").max(2000),
@@ -1027,7 +1042,7 @@ export const adminUserQuerySchema = z.object({
   universityId: uuid.optional(),
   courseId: uuid.optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
-  cursor: z.string().max(200).optional(),
+  cursor: z.coerce.number().int().min(0).default(0),
 });
 
 export const changeRoleSchema = z.object({
@@ -1144,7 +1159,7 @@ export const catalogueRequestIdParamSchema = z.object({ catalogueRequestId: uuid
 export const createReportSchema = z.object({
   targetType: z.enum(["STUDENT", "GROUP", "MESSAGE", "RESOURCE"]),
   targetId: uuid,
-  category: z.enum(["HARASSMENT", "INAPPROPRIATE_CONTENT", "SPAM", "ACADEMIC_DISHONESTY", "IMPERSONATION", "OTHER"]),
+  category: z.enum(["HARASSMENT", "INAPPROPRIATE_CONTENT", "SPAM", "ACADEMIC_DISHONESTY", "IMPERSONATION", "ABUSE", "OTHER"]),
   details: z.string().trim().min(10, "Tell us a little more.").max(2000),
 });
 
@@ -1169,6 +1184,194 @@ export const settingsSchema = z.object({
   key: z.string().trim().min(1).max(80),
   value: z.unknown(),
   description: z.string().trim().max(300).optional(),
+});
+
+// =============================================================================
+// Administrative console
+//
+// These schemas back the endpoints that let an administrator inspect and
+// intervene on a single entity. They live here with the rest of the validation
+// primitives so route modules never hand-roll a shape.
+// =============================================================================
+
+const reason = z.string().trim().min(5, "Give a reason for the audit trail.").max(500);
+const optionalReason = z.string().trim().max(500).optional().nullable();
+
+export const userIdParamSchema = z.object({ userId: uuid });
+
+export const adminUpdateUserSchema = z
+  .object({
+    firstName: z.string().trim().min(1, "Enter a first name.").max(80).optional(),
+    lastName: z.string().trim().min(1, "Enter a last name.").max(80).optional(),
+    email: z.string().trim().toLowerCase().email("Enter a valid email address.").max(254).optional(),
+    yearOfStudy: z.coerce.number().int().min(1).max(10).optional().nullable(),
+    programId: uuid.optional().nullable(),
+  })
+  .refine((value) => Object.values(value).some((entry) => entry !== undefined), {
+    message: "Provide at least one field to update.",
+  });
+
+export const adminChangeUserRoleSchema = z.object({
+  role: z.enum(["STUDENT", "GROUP_LEADER", "ADMIN"]),
+  reason,
+});
+
+export const adminSuspendUserSchema = z.object({
+  reason,
+  suspendSessions: z.boolean().default(true),
+});
+
+export const adminRestoreUserSchema = z.object({ reason: optionalReason });
+
+export const adminGroupQuerySchema = z.object({
+  q: shortText.max(120).optional(),
+  status: z.enum(["ACTIVE", "ARCHIVED", "DISBANDED", "SUSPENDED"]).optional(),
+  privacy: z.enum(["PUBLIC", "REQUEST_REQUIRED", "INVITE_ONLY"]).optional(),
+  courseId: uuid.optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  cursor: z.coerce.number().int().min(0).default(0),
+});
+
+export const adminGroupSuspendSchema = z.object({ reason });
+export const adminGroupRestoreSchema = z.object({ reason: optionalReason });
+export const adminGroupArchiveSchema = z.object({ reason: optionalReason });
+export const adminGroupMemberParamSchema = z.object({ groupId: uuid, userId: uuid });
+
+export const adminSessionCancelSchema = z.object({ reason });
+
+export const reportIdParamSchema = z.object({ reportId: uuid });
+
+export const adminCourseIdParamSchema = z.object({ courseId: uuid });
+
+export const adminAnnouncementQuerySchema = z.object({
+  status: z.enum(["DRAFT", "SCHEDULED", "PUBLISHED", "ARCHIVED"]).optional(),
+  category: z.enum(["GENERAL", "ACADEMIC", "MAINTENANCE", "SECURITY", "PLATFORM_UPDATE"]).optional(),
+  q: shortText.max(120).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  cursor: z.coerce.number().int().min(0).default(0),
+});
+
+const announcementBase = z.object({
+  title: z.string().trim().min(3, "Give the announcement a title.").max(160),
+  body: z.string().trim().min(3, "Write a short message.").max(4000),
+  category: z.enum(["GENERAL", "ACADEMIC", "MAINTENANCE", "SECURITY", "PLATFORM_UPDATE"]).default("GENERAL"),
+  audience: z.enum(["ALL", "STUDENTS", "GROUP_LEADERS", "ADMINS"]).default("ALL"),
+  status: z.enum(["DRAFT", "SCHEDULED"]).default("DRAFT"),
+  scheduledFor: z.string().datetime({ offset: true }).optional().nullable(),
+});
+
+/** A scheduled announcement must carry a future time; a draft must not. */
+export const createAnnouncementSchema = announcementBase.superRefine((value, ctx) => {
+  if (value.status === "SCHEDULED") {
+    if (!value.scheduledFor) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["scheduledFor"], message: "Choose when to publish." });
+      return;
+    }
+    if (new Date(value.scheduledFor).getTime() <= Date.now()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["scheduledFor"], message: "Pick a time in the future." });
+    }
+  }
+});
+
+export const updateAnnouncementSchema = announcementBase.partial().superRefine((value, ctx) => {
+  if (value.status === "SCHEDULED" && value.scheduledFor && new Date(value.scheduledFor).getTime() <= Date.now()) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["scheduledFor"], message: "Pick a time in the future." });
+  }
+});
+
+export const announcementIdParamSchema = z.object({ announcementId: uuid });
+
+// -----------------------------------------------------------------------------
+// Structured platform settings. Each section is validated independently, and a
+// PATCH is merged over the stored value before the merged shape is checked, so a
+// partial edit can never persist an invalid combination.
+// -----------------------------------------------------------------------------
+
+const emailOrEmpty = z.union([z.string().trim().email("Enter a valid email address."), z.literal("")]);
+
+export const settingSectionSchemas = Object.freeze({
+  "platform.general": z.object({
+    name: z.string().trim().min(1, "Give the platform a name.").max(80),
+    description: z.string().trim().max(500),
+    supportEmail: emailOrEmpty,
+    maintenanceBanner: z.string().trim().max(300),
+  }),
+  "registration.settings": z.object({
+    enabled: z.boolean(),
+    allowedDomains: z
+      .array(z.string().trim().toLowerCase().regex(/^[a-z0-9.-]+\.[a-z]{2,}$/, "Use a domain like university.edu."))
+      .max(20),
+    requireEmailVerification: z.boolean(),
+  }),
+  "security.settings": z.object({
+    passwordMinLength: z.coerce.number().int().min(8).max(64),
+    sessionIdleMinutes: z.coerce.number().int().min(5).max(1440),
+    maxLoginAttempts: z.coerce.number().int().min(3).max(20),
+    rateLimitPerMinute: z.coerce.number().int().min(30).max(5000),
+  }),
+  "maintenance.settings": z.object({
+    enabled: z.boolean(),
+    message: z.string().trim().min(3, "Write the message users will see.").max(500),
+  }),
+  "notifications.settings": z.object({
+    platformNotificationsEnabled: z.boolean(),
+    emailDeliveryEnabled: z.boolean(),
+  }),
+  "ai.runtime": z.object({
+    assistantEnabled: z.boolean(),
+    matchingEnabled: z.boolean(),
+    maxRequestsPerHour: z.coerce.number().int().min(1).max(1000),
+    timeoutMs: z.coerce.number().int().min(1000).max(120_000),
+  }),
+  "academic.settings": z.object({
+    semesters: z.array(z.string().trim().min(1).max(60)).min(1).max(20),
+    academicYear: z.string().trim().min(4).max(20),
+  }),
+});
+
+export const settingSectionKeySchema = z.object({
+  key: z.enum(Object.keys(settingSectionSchemas)),
+});
+
+export const aiRuntimeUpdateSchema = settingSectionSchemas["ai.runtime"].partial();
+
+export const aiUsageQuerySchema = z.object({
+  range: z.coerce
+    .number()
+    .int()
+    .refine((value) => [7, 30, 90].includes(value), "Range must be 7, 30 or 90 days.")
+    .default(30),
+});
+
+export const aiCircuitParamSchema = z.object({ id: z.string().trim().min(3).max(200) });
+
+export const adminAnalyticsQuerySchema = z.object({
+  range: z.coerce
+    .number()
+    .int()
+    .refine((value) => [7, 30, 90].includes(value), "Range must be 7, 30 or 90 days.")
+    .default(30),
+});
+
+export const adminAnalyticsExportQuerySchema = z.object({
+  range: z.coerce
+    .number()
+    .int()
+    .refine((value) => [7, 30, 90].includes(value), "Range must be 7, 30 or 90 days.")
+    .default(30),
+  format: z.enum(["csv", "pdf"]).default("csv"),
+});
+
+export const adminAuditQuerySchema = z.object({
+  action: z.string().trim().max(80).optional(),
+  entityType: z.string().trim().max(40).optional(),
+  entityId: z.string().trim().max(80).optional(),
+  actorId: uuid.optional(),
+  outcome: z.enum(["SUCCESS", "FAILURE", "PARTIAL"]).optional(),
+  from: z.string().datetime({ offset: true }).optional(),
+  to: z.string().datetime({ offset: true }).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  cursor: z.coerce.number().int().min(0).default(0),
 });
 
 // =============================================================================

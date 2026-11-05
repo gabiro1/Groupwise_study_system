@@ -119,7 +119,7 @@ export function LoginForm({ nextPath = "/dashboard" }) {
       // spoofed by editing the form.
       let destination = "/dashboard";
       if (role === "ADMIN") destination = "/admin";
-      else if (role === "LECTURER") destination = "/dashboard/lecturer";
+      else if (role === "GROUP_LEADER") destination = "/dashboard/leader";
       else if (role === "STUDENT" && nextPath.startsWith("/dashboard")) destination = nextPath;
       window.location.assign(new URL(destination, window.location.href));
     } catch (submitError) {

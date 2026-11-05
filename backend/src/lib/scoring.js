@@ -16,9 +16,10 @@ import { NEUTRAL, dataConfidence } from "./features.js";
  *     incomplete profiles would penalise exactly the students onboarding.
  *  3. A confidence term modestly discounts results built from thin data, and is
  *     surfaced to the user instead of being hidden in the score.
- *  4. The headline score is a blend of similarity and complementarity, because
- *     "we study the same thing" and "we fill each other's gaps" are different
- *     qualities and the product values the second one.
+ *  4. Similarity and complementarity are reported separately because "we study
+ *     the same thing" and "we fill each other's gaps" are different qualities.
+ *     The headline remains the configured weighted compatibility score; it is
+ *     not presented as a probability.
  */
 
 const clamp01 = (value) => (Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : NEUTRAL);
@@ -131,11 +132,7 @@ export function computeCompatibility(input) {
   // ---- Similarity vs complementarity --------------------------------------
   // Reported separately so the UI can explain *why* rather than showing an
   // unexplained number. Similarity = shared context; complementarity = gaps
-  // filled. The emphasis weight reflects the product's thesis that who fills
-  // your gaps matters more than who resembles you.
-  const emphasis = Number.isFinite(config.complementarityEmphasis)
-    ? config.complementarityEmphasis
-    : 0.6;
+  // filled. These diagnostics do not silently override the published weights.
 
   const similarityRaw = factors.goals * 0.4 + factors.topics * 0.35 + factors.course * 0.25;
   const complementarityRaw = factors.skills * 0.65 + factors.availability * 0.2 + factors.preferences * 0.15;

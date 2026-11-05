@@ -54,7 +54,8 @@ export function nextConnectionStatus(status, action) {
 async function assertRecipientReachable(requesterId, recipientId) {
   const { getStudentProfile } = await import("./discovery.service.js");
   try {
-    await getStudentProfile(requesterId, recipientId);
+    const profile = await getStudentProfile(requesterId, recipientId);
+    if (!profile.canInvite) throw new NotFoundError("That student");
   } catch {
     throw new NotFoundError("That student");
   }

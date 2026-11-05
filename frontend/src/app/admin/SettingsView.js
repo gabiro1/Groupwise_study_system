@@ -60,7 +60,7 @@ export default function SettingsView() {
       value = JSON.parse(valueText);
     } catch {
       setError(`“${key}” must be valid JSON.`);
-      return;
+      return false;
     }
     setBusyKey(key);
     setError("");
@@ -72,25 +72,28 @@ export default function SettingsView() {
       setMessage(`Saved “${key}”.`);
       setDrafts((current) => ({ ...current, [key]: undefined }));
       await reload();
+      return true;
     } catch (requestError) {
       setError(requestError.message);
+      return false;
     } finally {
       setBusyKey("");
     }
   }
 
-  function createSetting(event) {
+  async function createSetting(event) {
     event.preventDefault();
     const key = newKey.trim();
     if (!key) {
       setError("Give the setting a key.");
       return;
     }
-    save(key, newValue, newDescription.trim()).then(() => {
+    const saved = await save(key, newValue, newDescription.trim());
+    if (saved) {
       setNewKey("");
       setNewValue("{}");
       setNewDescription("");
-    });
+    }
   }
 
   const jsonFor = (setting) => JSON.stringify(setting.value ?? null, null, 2);

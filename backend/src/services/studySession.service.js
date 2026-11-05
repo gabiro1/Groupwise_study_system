@@ -81,7 +81,7 @@ async function loadSession(sessionId) {
        JOIN workspaces w ON w.id = s.workspace_id
        JOIN study_groups g ON g.id = w.group_id
        JOIN courses c ON c.id = g.course_id
-      WHERE s.id = $1`,
+       WHERE s.id = $1 AND g.status = 'ACTIVE'`,
     [sessionId],
     "sessions:load",
   );
@@ -255,8 +255,11 @@ export async function listMySessions(userId, { scope = "all" } = {}) {
        JOIN courses c ON c.id = g.course_id
        JOIN study_group_members m ON m.group_id = g.id AND m.left_at IS NULL
        LEFT JOIN session_participants p ON p.session_id = s.id AND p.student_id = $1
-      WHERE m.student_id = $1
-        AND (${scopeClause(scope)})
+       WHERE m.student_id = $1
+         AND m.status = 'ACTIVE'
+         AND g.status = 'ACTIVE'
+         AND NOT w.is_archived
+         AND (${scopeClause(scope)})
       ORDER BY
         CASE WHEN s.status IN ('ACTIVE', 'PAUSED') THEN 0
              WHEN s.status = 'SCHEDULED' THEN 1
@@ -396,7 +399,7 @@ export async function createStudySession(userId, input) {
       inviteeRows = [];
       for (const studentId of participantIds) {
         const member = await tx.queryOne(
-          `SELECT 1 FROM study_group_members WHERE group_id = $1 AND student_id = $2 AND left_at IS NULL`,
+           `SELECT 1 FROM study_group_members WHERE group_id = $1 AND student_id = $2 AND left_at IS NULL AND status = 'ACTIVE'`,
           [group.id, studentId],
           "sessions:inviteeCheck",
         );
@@ -411,7 +414,7 @@ export async function createStudySession(userId, input) {
       }
     } else {
       inviteeRows = await tx.queryRows(
-        `SELECT student_id FROM study_group_members WHERE group_id = $1 AND left_at IS NULL`,
+         `SELECT student_id FROM study_group_members WHERE group_id = $1 AND left_at IS NULL AND status = 'ACTIVE'`,
         [group.id],
         "sessions:openInvitees",
       );
@@ -693,7 +696,7 @@ export async function addParticipant(sessionId, userId, studentId) {
   if (!access.isModerator) throw new ForbiddenError("Only the group leader can add participants.");
 
   const member = await queryOne(
-    `SELECT 1 FROM study_group_members WHERE group_id = $1 AND student_id = $2 AND left_at IS NULL`,
+     `SELECT 1 FROM study_group_members WHERE group_id = $1 AND student_id = $2 AND left_at IS NULL AND status = 'ACTIVE'`,
     [access.session.group_id, studentId],
     "sessions:addMemberCheck",
   );
@@ -801,7 +804,7 @@ export async function rotateRoles(sessionId, userId, { roundNumber = null } = {}
       `SELECT u.id AS student_id, u.first_name, u.last_name
          FROM study_group_members m
          JOIN users u ON u.id = m.student_id
-        WHERE m.group_id = $1 AND m.left_at IS NULL
+         WHERE m.group_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
         ORDER BY u.first_name, u.last_name`,
       [access.session.group_id],
       "sessions:rolesFallback",

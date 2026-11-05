@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
+import { backendUrl } from "../backend-url";
 import { forwardSetCookies } from "../cookies";
 import { applySetCookies, refreshSession } from "../session/refresh-session";
-
-const backendUrl = (process.env.BACKEND_API_URL || "http://localhost:4000").replace(/\/+$/, "");
 const allowedMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+const safePathSegment = /^[A-Za-z0-9_.:~-]+$/;
 
 function cookieValue(cookieHeader, name) {
   const value = cookieHeader
@@ -14,15 +14,13 @@ function cookieValue(cookieHeader, name) {
   return value ? decodeURIComponent(value) : undefined;
 }
 
-async function backendRequest(url, method, body, cookie, csrfToken) {
+async function backendRequest(url, method, body, cookie, csrfToken, contentType) {
   const headers = new Headers({ accept: "application/json" });
   if (cookie) headers.set("cookie", cookie);
   if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
     headers.set("x-csrf-token", csrfToken || "");
   }
-  if (body !== undefined) {
-    headers.set("content-type", "application/json");
-  }
+  if (body !== undefined && contentType) headers.set("content-type", contentType);
   const response = await fetch(url, {
     method,
     headers,
@@ -34,7 +32,16 @@ async function backendRequest(url, method, body, cookie, csrfToken) {
 
 async function forward(request, context) {
   const { path = [] } = await context.params;
-  if (!path.length || path.some((part) => !/^[\w-]+$/.test(part))) {
+  if (
+    !path.length
+    || path.some((part) => (
+      typeof part !== "string"
+      || part.length === 0
+      || part === "."
+      || part === ".."
+      || !safePathSegment.test(part)
+    ))
+  ) {
     return NextResponse.json({ error: { message: "That API route does not exist." } }, { status: 404 });
   }
 
@@ -45,12 +52,15 @@ async function forward(request, context) {
 
   const cookie = request.headers.get("cookie") || "";
   const csrfToken = cookieValue(cookie, "lien_csrf");
-  const body = ["POST", "PUT", "PATCH", "DELETE"].includes(method) ? await request.text() : undefined;
+  const contentType = request.headers.get("content-type") || "";
+  const body = ["POST", "PUT", "PATCH", "DELETE"].includes(method)
+    ? (contentType.toLowerCase().startsWith("multipart/form-data") ? await request.arrayBuffer() : await request.text())
+    : undefined;
   const apiUrl = `${backendUrl}/api/${path.join("/")}${request.nextUrl.search}`;
   let result;
 
   try {
-    result = await backendRequest(apiUrl, method, body, cookie, csrfToken);
+    result = await backendRequest(apiUrl, method, body, cookie, csrfToken, contentType);
 
     if (
       result.response.status === 401
@@ -67,6 +77,7 @@ async function forward(request, context) {
           body,
           rotatedCookie,
           cookieValue(rotatedCookie, "lien_csrf"),
+          contentType,
         );
         result = {
           ...retry,
@@ -90,6 +101,16 @@ async function forward(request, context) {
   const status = result.response?.status ?? result.status;
   let payload = result.payload;
   if (result.response) {
+    const responseContentType = result.response.headers.get("content-type") || "";
+    if (!responseContentType.toLowerCase().includes("application/json")) {
+      const binary = await result.response.arrayBuffer();
+      const headers = new Headers();
+      for (const name of ["content-type", "content-length", "content-disposition", "cache-control"]) {
+        const value = result.response.headers.get(name);
+        if (value) headers.set(name, value);
+      }
+      return new NextResponse(binary, { status, headers });
+    }
     try {
       payload = status === 204 ? null : await result.response.json();
     } catch {

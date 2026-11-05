@@ -50,6 +50,26 @@ function memberName(member) {
   return [member.firstName || member.first_name, member.lastName || member.last_name].filter(Boolean).join(" ") || "Group member";
 }
 
+function LeaderPageSkeleton() {
+  return (
+    <div className="leader-page-skeleton" role="status" aria-label="Loading leadership dashboard">
+      <span className="sr-only">Loading your leadership dashboard…</span>
+      <div className="leader-skeleton-heading"><span /><span /><span /></div>
+      <div className="leader-skeleton-nav"><span /><span /><span /><span /></div>
+      <div className="leader-skeleton-stats"><span /><span /><span /><span /></div>
+      <div className="leader-skeleton-panels"><span /><span /></div>
+    </div>
+  );
+}
+
+function LeaderDataSkeleton() {
+  return (
+    <div className="leader-data-skeleton" role="status" aria-label="Loading section">
+      <span /><span /><span />
+    </div>
+  );
+}
+
 function formatDateTime(value) {
   if (!value) return "Date unavailable";
   const date = new Date(value);
@@ -149,7 +169,7 @@ export default function LeaderDashboard({ initialSection = "overview", initialGr
       }
 
       if (!active) return;
-      if (auth.user?.role !== "STUDENT") {
+      if (!["STUDENT", "GROUP_LEADER"].includes(auth.user?.role)) {
         if (auth.user?.role === "ADMIN") {
           window.location.replace("/admin");
           return;
@@ -194,7 +214,7 @@ export default function LeaderDashboard({ initialSection = "overview", initialGr
     return (
       <main className="app-shell">
         <div className="content-wrap leader-center">
-          <p className="feature-muted">Loading your leadership dashboard…</p>
+          <LeaderPageSkeleton />
         </div>
       </main>
     );
@@ -534,7 +554,7 @@ function OverviewSection({ groups, totals, activeGroup, identity, navigate, refr
           <div className="section-heading">
             <div><span className="section-overline">UP NEXT</span><h2>Upcoming sessions</h2></div>
           </div>
-          {loading && <p className="feature-muted">Loading sessions…</p>}
+          {loading && <LeaderDataSkeleton />}
           {error && <p className="feature-error">{error}</p>}
           {!loading && !error && sessions.length === 0 && <p className="feature-muted">No sessions scheduled yet.</p>}
           <ul className="leader-list">
@@ -635,7 +655,7 @@ function ResourcesSection({ groups, refreshKey }) {
         <p className="leader-muted">
           Resources live in each group&apos;s workspace. You only ever see material from the groups you lead.
         </p>
-        {state.loading && <p className="feature-muted">Loading resources…</p>}
+        {state.loading && <LeaderDataSkeleton />}
         {state.error && <p className="feature-error">{state.error}</p>}
         {!state.loading && !state.error && managed.length === 0 && (
           <p className="feature-muted">None of your groups have an active workspace yet.</p>
@@ -710,7 +730,7 @@ function RequestsSection({ activeGroup, showToast, onRefreshOverview, refreshKey
         </div>
       </div>
       {actionError && <p className="feature-error">{actionError}</p>}
-      {loading && <p className="feature-muted">Loading requests…</p>}
+      {loading && <LeaderDataSkeleton />}
       {error && <p className="feature-error">{error}</p>}
       {!loading && !error && requests.length === 0 && (
         <p className="feature-muted">No pending requests. New requests appear here the moment a student asks to join.</p>
@@ -786,7 +806,7 @@ function InvitationsSection({ activeGroup, showToast, onRefreshOverview, refresh
         </div>
       </div>
       {actionError && <p className="feature-error">{actionError}</p>}
-      {loading && <p className="feature-muted">Loading invitations…</p>}
+      {loading && <LeaderDataSkeleton />}
       {error && <p className="feature-error">{error}</p>}
       {!loading && !error && invitations.length === 0 && (
         <p className="feature-muted">No invitations are waiting on an answer. Invite students from the Members or Matching tab.</p>
@@ -908,7 +928,7 @@ function MembersSection({ activeGroup, identity, showToast, onRefreshOverview, r
     }
   }
 
-  if (detail.loading) return <p className="feature-muted">Loading members…</p>;
+  if (detail.loading) return <LeaderDataSkeleton />;
   if (detail.error) return <p className="feature-error">{detail.error}</p>;
   const members = group?.members || [];
   const isOwner = group?.viewer?.role === "OWNER";
@@ -1102,7 +1122,7 @@ function SessionsSection({ activeGroup, showToast, refreshKey }) {
             ))}
           </div>
         </div>
-        {loading && <p className="feature-muted">Loading sessions…</p>}
+        {loading && <LeaderDataSkeleton />}
         {error && <p className="feature-error">{error}</p>}
         {!loading && !error && list.length === 0 && <p className="feature-muted">Nothing on the calendar for this view.</p>}
         <ul className="leader-list">
@@ -1205,7 +1225,7 @@ function MatchingSection({ activeGroup, showToast, refreshKey }) {
         onChange={(event) => setQuery(event.target.value)}
       />
       {actionError && <p className="feature-error">{actionError}</p>}
-      {loading && <p className="feature-muted">Scoring candidates…</p>}
+      {loading && <LeaderDataSkeleton />}
       {error && <p className="feature-error">{error}</p>}
       {!loading && !error && candidates.length === 0 && <p className="feature-muted">No candidates to suggest right now.</p>}
       <div className="leader-candidate-grid">
@@ -1256,7 +1276,7 @@ function AnalyticsSection({ activeGroup, refreshKey }) {
   const path = activeGroup ? `study-groups/${activeGroup.id}/analytics?days=${days}` : "study-groups/leader/overview";
   const { loading, error, data } = useSectionData(path, [activeGroup?.id, days], refreshKey);
 
-  if (loading) return <p className="feature-muted">Crunching the numbers…</p>;
+  if (loading) return <LeaderDataSkeleton />;
   if (error) return <p className="feature-error">{error}</p>;
   if (!data?.group) return <p className="feature-muted">Select a group to see analytics.</p>;
 
@@ -1359,7 +1379,7 @@ function SettingsSection({ activeGroup, identity, showToast, onRefreshOverview, 
     }
   }
 
-  if (detail.loading) return <p className="feature-muted">Loading settings…</p>;
+  if (detail.loading) return <LeaderDataSkeleton />;
   if (detail.error) return <p className="feature-error">{detail.error}</p>;
   if (!group) return <p className="feature-muted">Select a group to manage its settings.</p>;
 

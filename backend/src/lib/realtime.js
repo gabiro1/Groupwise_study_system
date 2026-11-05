@@ -3,7 +3,7 @@ import cookie from "cookie";
 import env from "../config/env.js";
 import logger from "../config/logger.js";
 import { verifyAccessToken } from "./tokens.js";
-import { loadUser } from "../middleware/auth.js";
+import { loadUser, loadActiveSession } from "../middleware/auth.js";
 import { ForbiddenError } from "./errors.js";
 
 /**
@@ -24,6 +24,7 @@ import { ForbiddenError } from "./errors.js";
  */
 
 let io = null;
+const SESSION_REVALIDATION_MS = 30_000;
 
 export function getIo() {
   return io;
@@ -54,7 +55,10 @@ async function authenticateSocket(socket) {
   const payload = verifyAccessToken(token);
   const user = await loadUser(payload.sub);
   if (!user || user.status !== "ACTIVE") throw new ForbiddenError("Account unavailable.");
-  return user;
+  if (!(await loadActiveSession(payload.sid, user.id))) {
+    throw new ForbiddenError("Session unavailable.");
+  }
+  return { user, sessionId: payload.sid };
 }
 
 /**
@@ -75,8 +79,9 @@ export function initRealtime(httpServer) {
   // ---- MIDDLEWARE: authenticate every connection ---------------------------
   io.use(async (socket, next) => {
     try {
-      const user = await authenticateSocket(socket);
+      const { user, sessionId } = await authenticateSocket(socket);
       socket.data.user = { id: user.id, name: `${user.first_name} ${user.last_name}`.trim() };
+      socket.data.sessionId = sessionId;
       next();
     } catch (error) {
       next(error);
@@ -87,13 +92,57 @@ export function initRealtime(httpServer) {
   io.on("connection", (socket) => {
     logger.debug("socket connected", { userId: socket.data.user.id, socketId: socket.id });
 
+    let checkingSession = false;
+    const joinedSessions = new Set();
+    const sessionTimer = setInterval(async () => {
+      if (checkingSession) return;
+      checkingSession = true;
+      try {
+        if (!(await loadActiveSession(socket.data.sessionId, socket.data.user.id))) {
+          socket.disconnect(true);
+          return;
+        }
+
+        if (joinedSessions.size) {
+          const { canParticipateInSession } = await import("../services/studySession.service.js");
+          for (const sessionId of joinedSessions) {
+            try {
+              await canParticipateInSession(sessionId, socket.data.user.id);
+            } catch (error) {
+              // Group suspension/archive and membership removal are represented as
+              // authorization failures. Leave only the affected room; a database
+              // outage should not silently discard every live subscription.
+              if ([401, 403, 404].includes(error.status)) {
+                socket.leave(roomName(sessionId));
+                joinedSessions.delete(sessionId);
+                continue;
+              }
+              throw error;
+            }
+          }
+        }
+      } catch (error) {
+        logger.warn("Socket session revalidation failed", { userId: socket.data.user.id, message: error.message });
+      } finally {
+        checkingSession = false;
+      }
+    }, SESSION_REVALIDATION_MS);
+    sessionTimer.unref?.();
+
     socket.on("session:join", async ({ sessionId } = {}, acknowledge) => {
       try {
+        if (!(await loadActiveSession(socket.data.sessionId, socket.data.user.id))) {
+          socket.disconnect(true);
+          acknowledge?.({ ok: false, code: "UNAUTHENTICATED", message: "Session unavailable." });
+          return;
+        }
+
         // Imported lazily to keep this module independent of service wiring and
         // to avoid circular imports at boot.
         const { canParticipateInSession } = await import("../services/studySession.service.js");
         const access = await canParticipateInSession(sessionId, socket.data.user.id);
         await socket.join(roomName(access.sessionId));
+        joinedSessions.add(access.sessionId);
         acknowledge?.({ ok: true, sessionId: access.sessionId });
       } catch (error) {
         logger.warn("socket session join denied", {
@@ -107,10 +156,12 @@ export function initRealtime(httpServer) {
 
     socket.on("session:leave", ({ sessionId } = {}, acknowledge) => {
       socket.leave(roomName(sessionId));
+      joinedSessions.delete(sessionId);
       acknowledge?.({ ok: true });
     });
 
     socket.on("disconnect", () => {
+      clearInterval(sessionTimer);
       logger.debug("socket disconnected", { userId: socket.data.user.id, socketId: socket.id });
     });
   });

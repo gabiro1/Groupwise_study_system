@@ -67,10 +67,12 @@ export async function loadGroupWithMembership(groupId, userId) {
        LEFT JOIN learning_goals lg ON lg.id = g.goal_id
        LEFT JOIN users u ON u.id = g.owner_id
        LEFT JOIN LATERAL (
-         SELECT id FROM workspaces
-          WHERE group_id = g.id AND NOT is_archived
-          ORDER BY created_at DESC
-          LIMIT 1
+          SELECT w.id
+            FROM workspace_groups wg
+            JOIN workspaces w ON w.id = wg.workspace_id
+           WHERE wg.group_id = g.id AND g.status = 'ACTIVE' AND NOT w.is_archived
+           ORDER BY wg.assigned_at DESC
+           LIMIT 1
        ) w ON TRUE
       WHERE g.id = $1`,
     [groupId, userId],
@@ -93,6 +95,12 @@ export async function loadGroupWithMembership(groupId, userId) {
 /** Load a group the caller must be an active member of. */
 export async function assertMember(groupId, userId) {
   const { group, membership } = await loadGroupWithMembership(groupId, userId);
+  // Suspension and archive are access-closure states, not merely labels. Keep
+  // the same not-found response for closed groups so an old membership cannot
+  // be used to probe or continue using their workspace.
+  if (group.status !== "ACTIVE") {
+    throw new NotFoundError("That study group");
+  }
   if (!membership || membership.status !== "ACTIVE") {
     throw new ForbiddenError("You need to be a member of this study group to do that.");
   }
@@ -170,10 +178,12 @@ export async function searchGroups(viewerId, filters = {}) {
             u.first_name AS owner_first_name, u.last_name AS owner_last_name,
             (SELECT count(*)::int FROM study_group_schedule s
               WHERE s.group_id = g.id) AS schedule_slot_count,
-            EXISTS (SELECT 1 FROM study_group_members m
-                     WHERE m.group_id = g.id AND m.student_id = $1 AND m.left_at IS NULL) AS is_member,
-            EXISTS (SELECT 1 FROM study_group_members m
-                     WHERE m.group_id = g.id AND m.student_id = $1 AND m.left_at IS NULL
+             EXISTS (SELECT 1 FROM study_group_members m
+                      WHERE m.group_id = g.id AND m.student_id = $1 AND m.left_at IS NULL
+                        AND m.status = 'ACTIVE') AS is_member,
+             EXISTS (SELECT 1 FROM study_group_members m
+                      WHERE m.group_id = g.id AND m.student_id = $1 AND m.left_at IS NULL
+                        AND m.status = 'ACTIVE'
                        AND m.role IN ('OWNER', 'MODERATOR')) AS can_moderate,
             EXISTS (SELECT 1 FROM study_group_join_requests jr
                      WHERE jr.group_id = g.id AND jr.student_id = $1 AND jr.status = 'PENDING') AS has_pending_request,
@@ -567,7 +577,7 @@ async function scoreInvitee(groupId, inviterId, inviteeId) {
 /** Accept or decline an invitation. */
 export async function respondToInvitation(userId, invitationId, response) {
   const invitation = await queryOne(
-    `SELECT i.*, g.name AS group_name, g.slug, g.member_count, g.max_size, g.privacy
+    `SELECT i.*, g.name AS group_name, g.slug, g.member_count, g.max_size, g.privacy, g.status AS group_status
        FROM study_group_invitations i JOIN study_groups g ON g.id = i.group_id
       WHERE i.id = $1 AND i.invitee_id = $2`,
     [invitationId, userId],
@@ -575,6 +585,7 @@ export async function respondToInvitation(userId, invitationId, response) {
   );
 
   if (!invitation) throw new NotFoundError("That invitation");
+  if (invitation.group_status !== "ACTIVE") throw new NotFoundError("That invitation");
 
   if (invitation.status !== "PENDING") {
     throw new ConflictError(
@@ -988,13 +999,20 @@ export async function archiveGroup(groupId, actorId) {
   }
 
   await withTransaction(async (tx) => {
-    await tx.query(
-      "UPDATE study_groups SET status = 'ARCHIVED', archived_at = now() WHERE id = $1",
+    const archived = await tx.queryOne(
+      `UPDATE study_groups
+          SET status = 'ARCHIVED', archived_at = now()
+        WHERE id = $1 AND status = 'ACTIVE'
+        RETURNING id`,
       [groupId],
       "groups:archive",
     );
+    if (!archived) throw new ConflictError("That group changed state and cannot be archived.");
     await tx.query(
-      "UPDATE workspaces SET is_archived = TRUE, archived_at = now() WHERE group_id = $1 AND NOT is_archived",
+      `UPDATE workspaces
+          SET is_archived = TRUE, archived_at = now()
+        WHERE id IN (SELECT workspace_id FROM workspace_groups WHERE group_id = $1)
+          AND NOT is_archived`,
       [groupId],
       "groups:archiveWorkspace",
     );
@@ -1008,15 +1026,17 @@ export async function archiveGroup(groupId, actorId) {
       [groupId],
       "groups:cancelRequests",
     );
+    await recordAudit(
+      {
+        action: AUDIT.GROUP_ARCHIVED,
+        entityType: "study_group",
+        entityId: groupId,
+        actor: { id: actorId },
+        metadata: { name: group.name },
+      },
+      { tx },
+    );
   }, "groups:archive");
-
-  await recordAudit({
-    action: AUDIT.GROUP_ARCHIVED,
-    entityType: "study_group",
-    entityId: groupId,
-    actor: { id: actorId },
-    metadata: { name: group.name },
-  });
 
   return { archived: true, groupId };
 }
@@ -1045,12 +1065,13 @@ export async function listMyGroups(userId, { includeArchived = false } = {}) {
            JOIN study_groups g ON g.id = m.group_id
            JOIN courses c ON c.id = g.course_id
            LEFT JOIN LATERAL (
-             SELECT id FROM workspaces
-              WHERE group_id = g.id AND NOT is_archived
-              ORDER BY created_at DESC
+             SELECT w.id FROM workspace_groups wg
+             JOIN workspaces w ON w.id = wg.workspace_id
+              WHERE wg.group_id = g.id AND NOT w.is_archived
+              ORDER BY wg.assigned_at DESC
               LIMIT 1
            ) w ON TRUE
-          WHERE m.student_id = $1 AND m.left_at IS NULL
+          WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
             AND ($2::boolean OR g.status = 'ACTIVE')
        ) filtered
       ORDER BY
@@ -1081,7 +1102,8 @@ export async function listMyInvitations(userId) {
        JOIN study_groups g ON g.id = i.group_id
        JOIN courses c ON c.id = g.course_id
        JOIN users u ON u.id = i.inviter_id
-      WHERE i.invitee_id = $1 AND i.status = 'PENDING' AND i.expires_at > now()
+       WHERE i.invitee_id = $1 AND i.status = 'PENDING' AND i.expires_at > now()
+         AND g.status = 'ACTIVE'
       ORDER BY i.created_at DESC`,
     [userId],
     "groups:myInvitations",
@@ -1094,6 +1116,7 @@ export async function listMyInvitations(userId) {
        JOIN study_groups g ON g.id = jr.group_id
        JOIN courses c ON c.id = g.course_id
       WHERE jr.student_id = $1 AND jr.status = 'PENDING'
+        AND g.status = 'ACTIVE'
       ORDER BY jr.created_at DESC`,
     [userId],
     "groups:myRequests",
@@ -1132,7 +1155,12 @@ export async function listModerationQueue(groupId, actorId) {
 
 async function workspaceFor(groupId) {
   const row = await queryOne(
-    "SELECT id FROM workspaces WHERE group_id = $1 AND NOT is_archived",
+    `SELECT w.id
+       FROM workspace_groups wg
+       JOIN workspaces w ON w.id = wg.workspace_id
+      WHERE wg.group_id = $1 AND NOT w.is_archived
+      ORDER BY wg.assigned_at DESC
+      LIMIT 1`,
     [groupId],
     "groups:workspaceFor",
   );
@@ -1157,7 +1185,12 @@ async function workspaceFor(groupId) {
  */
 async function openMembershipOutcome(tx, groupId, studentId, joinedVia, recommendationId = null) {
   const workspace = await tx.query(
-    "SELECT id FROM workspaces WHERE group_id = $1 AND NOT is_archived",
+    `SELECT w.id
+       FROM workspace_groups wg
+       JOIN workspaces w ON w.id = wg.workspace_id
+      WHERE wg.group_id = $1 AND NOT w.is_archived
+      ORDER BY wg.assigned_at DESC
+      LIMIT 1`,
     [groupId],
     "groups:outcomeWorkspace",
   );
@@ -1198,7 +1231,7 @@ async function closeMembershipOutcome(tx, groupId, studentId, reason) {
             leave_reason = $3
        FROM workspaces w
       WHERE o.workspace_id = w.id
-        AND w.group_id = $1
+        AND EXISTS (SELECT 1 FROM workspace_groups wg WHERE wg.workspace_id = w.id AND wg.group_id = $1)
         AND o.student_id = $2
         AND o.left_at IS NULL`,
     [groupId, studentId, reason],
@@ -1227,7 +1260,9 @@ export async function leaderOverview(userId) {
               WHERE i.group_id = g.id AND i.status = 'PENDING' AND i.expires_at > now()) AS pending_invitations,
             (SELECT count(*)::int FROM study_sessions ss
               JOIN workspaces wsp ON wsp.id = ss.workspace_id
-              WHERE wsp.group_id = g.id AND ss.status = 'SCHEDULED' AND ss.starts_at > now()) AS upcoming_sessions,
+              WHERE NOT wsp.is_archived
+                AND EXISTS (SELECT 1 FROM workspace_groups wg2 WHERE wg2.workspace_id = wsp.id AND wg2.group_id = g.id)
+                AND ss.status = 'SCHEDULED' AND ss.starts_at > now()) AS upcoming_sessions,
             (SELECT count(*)::int FROM study_group_members m2
               WHERE m2.group_id = g.id AND m2.left_at IS NULL) AS active_members,
             (SELECT max(created_at) FROM group_activity_events e WHERE e.group_id = g.id) AS last_activity_at
@@ -1235,12 +1270,13 @@ export async function leaderOverview(userId) {
        JOIN study_groups g ON g.id = m.group_id
        JOIN courses c ON c.id = g.course_id
        LEFT JOIN LATERAL (
-         SELECT id FROM workspaces
-          WHERE group_id = g.id AND NOT is_archived
-          ORDER BY created_at DESC
+         SELECT w.id FROM workspace_groups wg
+         JOIN workspaces w ON w.id = wg.workspace_id
+          WHERE wg.group_id = g.id AND NOT w.is_archived
+          ORDER BY wg.assigned_at DESC
           LIMIT 1
        ) w ON TRUE
-      WHERE m.student_id = $1 AND m.left_at IS NULL
+       WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
         AND m.role IN ('OWNER', 'MODERATOR')
         AND g.status = 'ACTIVE'
       ORDER BY m.role = 'OWNER' DESC, g.member_count DESC`,
@@ -1256,10 +1292,10 @@ export async function leaderOverview(userId) {
        FROM study_group_members m
        JOIN study_groups g ON g.id = m.group_id
       WHERE g.status = 'ACTIVE'
-        AND m.left_at IS NULL
+         AND m.left_at IS NULL AND m.status = 'ACTIVE'
         AND m.group_id IN (
-          SELECT gm.group_id FROM study_group_members gm
-           WHERE gm.student_id = $1 AND gm.left_at IS NULL
+           SELECT gm.group_id FROM study_group_members gm
+            WHERE gm.student_id = $1 AND gm.left_at IS NULL AND gm.status = 'ACTIVE'
              AND gm.role IN ('OWNER', 'MODERATOR')
         )`,
     [userId],

@@ -1,8 +1,12 @@
+import { mkdir, unlink, writeFile, stat } from "node:fs/promises";
+import { extname, resolve, sep } from "node:path";
+import { randomUUID } from "node:crypto";
 import { query, queryRows, queryOne, withTransaction } from "../config/db.js";
 import { NotFoundError, ForbiddenError, ConflictError, AppError } from "../lib/errors.js";
-import { assertMember } from "./group.service.js";
+import { assertModerator } from "./group.service.js";
 import { NOTIFICATION_TYPE, MESSAGE_KIND } from "../config/constants.js";
 import { notifyMany } from "../lib/notifications.js";
+import env from "../config/env.js";
 
 /**
  * Workspace service — the collaborative layer of a study group.
@@ -20,15 +24,48 @@ import { notifyMany } from "../lib/notifications.js";
 /** Resolve a workspace and assert the caller is an active member of its group. */
 export async function assertWorkspaceAccess(workspaceId, userId) {
   const workspace = await queryOne(
-    "SELECT id, group_id, name, created_by, is_archived FROM workspaces WHERE id = $1",
-    [workspaceId],
+    `SELECT w.id, w.group_id, w.name, w.created_by, w.is_archived,
+            access.membership_id, access.membership_role, access.membership_status,
+            access.access_group_id
+       FROM workspaces w
+       JOIN study_groups g ON g.id = w.group_id
+       LEFT JOIN LATERAL (
+         SELECT m.id AS membership_id, m.role AS membership_role,
+                m.status AS membership_status, m.group_id AS access_group_id
+           FROM workspace_groups wg
+           JOIN study_groups ag ON ag.id = wg.group_id AND ag.status = 'ACTIVE'
+           JOIN study_group_members m
+             ON m.group_id = ag.id AND m.student_id = $2
+          WHERE wg.workspace_id = w.id
+            AND m.left_at IS NULL
+            AND m.status = 'ACTIVE'
+          ORDER BY (m.group_id = w.group_id) DESC, m.role = 'OWNER' DESC, m.joined_at
+          LIMIT 1
+       ) access ON TRUE
+      WHERE w.id = $1 AND g.status = 'ACTIVE'`,
+    [workspaceId, userId],
     "workspace:load",
   );
 
   if (!workspace) throw new NotFoundError("That workspace");
-  if (workspace.is_archived) throw new NotFoundError("That workspace");
+  if (workspace.is_archived || !workspace.membership_id) throw new NotFoundError("That workspace");
 
-  const { group, membership } = await assertMember(workspace.group_id, userId);
+  const group = await queryOne(
+    `SELECT g.*, c.course_code, c.name AS course_name, c.credit_hours,
+            lg.code AS goal_code, lg.label AS goal_label
+       FROM study_groups g
+       JOIN courses c ON c.id = g.course_id
+       LEFT JOIN learning_goals lg ON lg.id = g.goal_id
+      WHERE g.id = $1`,
+    [workspace.group_id],
+    "workspace:primaryGroup",
+  );
+  const membership = {
+    id: workspace.membership_id,
+    role: workspace.membership_role,
+    status: workspace.membership_status,
+    groupId: workspace.access_group_id,
+  };
 
   return { workspace, group, membership };
 }
@@ -45,8 +82,8 @@ export async function listMyWorkspaces(userId) {
   const workspaces = await queryRows(
     `SELECT w.id, w.name, w.group_id, w.created_by,
             g.name AS group_name, g.member_count,
-            m.role AS membership_role,
-            (m.role IN ('OWNER', 'MODERATOR') OR w.created_by = $1) AS can_archive,
+            access.membership_role,
+            (access.membership_role IN ('OWNER', 'MODERATOR') OR w.created_by = $1) AS can_archive,
             c.course_code, c.name AS course_name,
             (SELECT string_agg(ct.name, ', ' ORDER BY sgt.focus_weight DESC, ct.name)
                FROM study_group_topics sgt
@@ -62,10 +99,18 @@ export async function listMyWorkspaces(userId) {
             latest_message.last_name AS last_message_last_name,
             progress.topic_count AS progress_topic_count,
             progress.completed_count AS progress_completed_count
-       FROM study_group_members m
-       JOIN study_groups g ON g.id = m.group_id
+       FROM workspaces w
+       JOIN study_groups g ON g.id = w.group_id
        JOIN courses c ON c.id = g.course_id
-       JOIN workspaces w ON w.group_id = g.id AND NOT w.is_archived
+       JOIN LATERAL (
+         SELECT m.role AS membership_role
+           FROM workspace_groups wg
+           JOIN study_groups ag ON ag.id = wg.group_id AND ag.status = 'ACTIVE'
+           JOIN study_group_members m ON m.group_id = ag.id AND m.student_id = $1
+          WHERE wg.workspace_id = w.id AND m.left_at IS NULL AND m.status = 'ACTIVE'
+          ORDER BY (wg.group_id = w.group_id) DESC, m.role = 'OWNER' DESC, m.joined_at
+          LIMIT 1
+       ) access ON TRUE
        LEFT JOIN LATERAL (
          SELECT max(workspace_activity.at) AS last_activity_at
            FROM (
@@ -100,10 +145,8 @@ export async function listMyWorkspaces(userId) {
              ON gtp.workspace_id = w.id AND gtp.topic_id = sgt.topic_id
           WHERE sgt.group_id = g.id
        ) progress ON TRUE
-      WHERE m.student_id = $1
-        AND m.left_at IS NULL
-        AND m.status = 'ACTIVE'
-      ORDER BY last_activity_at DESC`,
+       WHERE NOT w.is_archived AND g.status = 'ACTIVE'
+       ORDER BY last_activity_at DESC`,
     [userId],
     "workspace:listMine",
   );
@@ -135,13 +178,19 @@ export async function archiveWorkspace(workspaceId, userId) {
 
 /** Create an additional workspace for one of the caller's active study groups. */
 export async function createWorkspace(userId, { groupId, name, description }) {
-  const { group } = await assertMember(groupId, userId);
+  const { group } = await assertModerator(groupId, userId);
   const result = await withTransaction(async (tx) => {
     const createdWorkspace = await tx.queryOne(
       `INSERT INTO workspaces (group_id, name, description, created_by)
        VALUES ($1, $2, $3, $4)
        RETURNING id, group_id, name, description, created_at`,
       [groupId, name, description, userId],
+    );
+    await tx.query(
+      `INSERT INTO workspace_groups (workspace_id, group_id, assigned_by)
+       VALUES ($1, $2, $3)`,
+      [createdWorkspace.id, groupId, userId],
+      "workspace:assignPrimaryGroup",
     );
     await tx.query(
       `INSERT INTO group_activity_events (group_id, actor_id, event_type, entity_type, entity_id)
@@ -161,6 +210,73 @@ export async function createWorkspace(userId, { groupId, name, description }) {
       memberCount: group.member_count,
     },
   };
+}
+
+async function assertWorkspaceManager(workspaceId, userId) {
+  const { workspace, membership } = await assertWorkspaceAccess(workspaceId, userId);
+  if (workspace.created_by === userId || canModerate(membership)) return { workspace };
+  if (!canModerate(membership)) {
+    throw new ForbiddenError("Only a workplace creator or group moderator can manage its groups.");
+  }
+  return { workspace };
+}
+
+/** Attach a group to a workplace. A group can belong to one active workplace. */
+export async function assignGroupToWorkspace(workspaceId, groupId, userId) {
+  const { group: targetGroup } = await assertModerator(groupId, userId);
+  await assertWorkspaceManager(workspaceId, userId);
+
+  const existing = await queryOne(
+    `SELECT w.name
+       FROM workspace_groups wg
+       JOIN workspaces w ON w.id = wg.workspace_id
+      WHERE wg.group_id = $1 AND NOT w.is_archived AND w.id <> $2
+      LIMIT 1`,
+    [groupId, workspaceId],
+    "workspace:groupAssignmentConflict",
+  );
+  if (existing) throw new ConflictError(`${targetGroup.name} is already assigned to another workplace.`);
+
+  await queryOne(
+    `INSERT INTO workspace_groups (workspace_id, group_id, assigned_by)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (workspace_id, group_id) DO NOTHING
+     RETURNING workspace_id, group_id, assigned_at`,
+    [workspaceId, groupId, userId],
+    "workspace:assignGroup",
+  );
+  return getWorkspaceGroups(workspaceId, userId);
+}
+
+/** Detach a secondary group. The primary legacy group cannot be detached. */
+export async function unassignGroupFromWorkspace(workspaceId, groupId, userId) {
+  const { workspace } = await assertWorkspaceManager(workspaceId, userId);
+  if (workspace.group_id === groupId) {
+    throw new ConflictError("The primary group cannot be removed from its workplace.");
+  }
+  await query(
+    "DELETE FROM workspace_groups WHERE workspace_id = $1 AND group_id = $2",
+    [workspaceId, groupId],
+    "workspace:unassignGroup",
+  );
+  return getWorkspaceGroups(workspaceId, userId);
+}
+
+export async function getWorkspaceGroups(workspaceId, userId) {
+  await assertWorkspaceAccess(workspaceId, userId);
+  return queryRows(
+    `SELECT g.id, g.name, g.member_count, g.course_id, c.course_code, c.name AS course_name,
+            m.role AS my_role, wg.assigned_at
+       FROM workspace_groups wg
+       JOIN study_groups g ON g.id = wg.group_id
+       JOIN courses c ON c.id = g.course_id
+       LEFT JOIN study_group_members m
+         ON m.group_id = g.id AND m.student_id = $2 AND m.left_at IS NULL AND m.status = 'ACTIVE'
+      WHERE wg.workspace_id = $1 AND g.status = 'ACTIVE'
+      ORDER BY (wg.group_id = (SELECT group_id FROM workspaces WHERE id = $1)) DESC, g.name`,
+    [workspaceId, userId],
+    "workspace:listGroups",
+  );
 }
 
 /**
@@ -265,7 +381,7 @@ export async function createPlan(workspaceId, userId, input) {
   }, "workspace:createPlan");
 
   const members = await queryRows(
-    `SELECT student_id FROM study_group_members WHERE group_id = $1 AND left_at IS NULL`,
+     `SELECT student_id FROM study_group_members WHERE group_id = $1 AND left_at IS NULL AND status = 'ACTIVE'`,
     [group.id],
     "workspace:planMembers",
   );
@@ -592,7 +708,7 @@ export async function createSession(workspaceId, userId, input) {
   );
 
   const members = await queryRows(
-    `SELECT student_id FROM study_group_members WHERE group_id = $1 AND left_at IS NULL AND student_id <> $2`,
+     `SELECT student_id FROM study_group_members WHERE group_id = $1 AND left_at IS NULL AND status = 'ACTIVE' AND student_id <> $2`,
     [group.id, userId],
     "workspace:sessionMembers",
   );
@@ -635,9 +751,9 @@ export async function listSessions(workspaceId, userId, filters) {
   const rows = await queryRows(
     `SELECT s.*, sp.rsvp, sp.attended,
             (SELECT count(*)::int FROM session_participants p WHERE p.session_id = s.id AND p.rsvp = 'GOING') AS going_count,
-            (SELECT count(*)::int FROM study_group_members m
-                JOIN workspaces w2 ON w2.group_id = m.group_id
-               WHERE w2.id = s.workspace_id AND m.left_at IS NULL) AS member_count
+            (SELECT count(DISTINCT m.student_id)::int FROM study_group_members m
+                JOIN workspace_groups wg2 ON wg2.group_id = m.group_id
+               WHERE wg2.workspace_id = s.workspace_id AND m.left_at IS NULL AND m.status = 'ACTIVE') AS member_count
        FROM study_sessions s
        LEFT JOIN session_participants sp ON sp.session_id = s.id AND sp.student_id = ${bind(userId)}
       WHERE ${clauses.join(" AND ")}
@@ -947,6 +1063,7 @@ export async function listResources(workspaceId, userId, filters = {}) {
 
   return queryRows(
     `SELECT r.id, r.title, r.description, r.kind, r.visibility, r.external_url,
+            r.original_filename, r.mime_type, r.size_bytes,
             r.topic_id, r.plan_id, r.created_at, r.uploaded_by,
             CASE WHEN r.kind = 'NOTE' THEN r.extracted_text ELSE NULL END AS content,
             u.first_name AS uploader_first_name, u.last_name AS uploader_last_name
@@ -963,10 +1080,9 @@ export async function listResources(workspaceId, userId, filters = {}) {
 export async function createResource(workspaceId, userId, input) {
   const { group } = await assertWorkspaceAccess(workspaceId, userId);
   if (input.kind === "FILE") {
-    throw new AppError("File uploads are not available here yet. Add a link or a text note instead.", {
-      status: 422,
-      code: "RESOURCE_FILE_UNAVAILABLE",
-    });
+    if (!input.file?.buffer?.length) {
+      throw new AppError("Choose a file to share with your group.", { status: 422, code: "RESOURCE_FILE_REQUIRED" });
+    }
   }
   if (input.kind === "LINK" && !input.externalUrl) {
     throw new AppError("A link resource needs a URL.", { status: 422, code: "RESOURCE_URL_REQUIRED" });
@@ -996,28 +1112,72 @@ export async function createResource(workspaceId, userId, input) {
     if (!topic) throw new NotFoundError("That group topic");
   }
 
-  return queryOne(
-    `INSERT INTO resources
-       (workspace_id, plan_id, topic_id, uploaded_by, title, description, kind,
-        visibility, external_url, extracted_text, extraction_status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'SKIPPED')
-     RETURNING id, title, description, kind, visibility, external_url, topic_id,
-               plan_id, created_at, uploaded_by,
-               CASE WHEN kind = 'NOTE' THEN extracted_text ELSE NULL END AS content`,
-    [
-      workspaceId,
-      input.planId ?? null,
-      input.topicId ?? null,
-      userId,
-      input.title,
-      input.description ?? "",
-      input.kind,
-      input.visibility ?? "GROUP",
-      input.externalUrl ?? null,
-      input.kind === "NOTE" ? input.content.trim() : null,
-    ],
-    "workspace:createResource",
+  let storageKey = null;
+  if (input.kind === "FILE") {
+    const extension = extname(input.file.originalname || "").toLowerCase().replace(/[^a-z0-9.]/g, "").slice(0, 12);
+    storageKey = `${workspaceId}/${randomUUID()}${extension}`;
+    const uploadRoot = resolve(env.UPLOAD_DIR);
+    const filePath = resolve(uploadRoot, storageKey);
+    await mkdir(resolve(filePath, ".."), { recursive: true });
+    await writeFile(filePath, input.file.buffer, { flag: "wx" });
+  }
+
+  try {
+    return await queryOne(
+      `INSERT INTO resources
+         (workspace_id, plan_id, topic_id, uploaded_by, title, description, kind,
+          visibility, external_url, extracted_text, extraction_status,
+          original_filename, storage_key, mime_type, size_bytes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'SKIPPED', $11, $12, $13, $14)
+       RETURNING id, title, description, kind, visibility, external_url,
+                 original_filename, mime_type, size_bytes, topic_id,
+                 plan_id, created_at, uploaded_by,
+                 CASE WHEN kind = 'NOTE' THEN extracted_text ELSE NULL END AS content`,
+      [
+        workspaceId,
+        input.planId ?? null,
+        input.topicId ?? null,
+        userId,
+        input.title,
+        input.description ?? "",
+        input.kind,
+        input.visibility ?? "GROUP",
+        input.externalUrl ?? null,
+        input.kind === "NOTE" ? input.content.trim() : null,
+        input.kind === "FILE" ? input.file.originalname : null,
+        storageKey,
+        input.kind === "FILE" ? input.file.mimetype : null,
+        input.kind === "FILE" ? input.file.size : null,
+      ],
+      "workspace:createResource",
+    );
+  } catch (error) {
+    if (storageKey) await unlink(resolve(env.UPLOAD_DIR, storageKey)).catch(() => {});
+    throw error;
+  }
+}
+
+export async function getResourceFile(workspaceId, resourceId, userId) {
+  await assertWorkspaceAccess(workspaceId, userId);
+  const resource = await queryOne(
+    `SELECT original_filename, storage_key, mime_type, size_bytes
+       FROM resources
+      WHERE id = $1 AND workspace_id = $2 AND kind = 'FILE' AND NOT is_deleted`,
+    [resourceId, workspaceId],
+    "workspace:resourceFile",
   );
+  if (!resource?.storage_key) throw new NotFoundError("That resource file");
+  const root = resolve(env.UPLOAD_DIR);
+  const filePath = resolve(root, resource.storage_key);
+  if (!(filePath === root || filePath.startsWith(`${root}${sep}`))) {
+    throw new AppError("That resource file is not available.", { status: 404, code: "RESOURCE_FILE_NOT_FOUND" });
+  }
+  try {
+    await stat(filePath);
+  } catch {
+    throw new NotFoundError("That resource file");
+  }
+  return { filePath, filename: resource.original_filename || "download", mimeType: resource.mime_type || "application/octet-stream", size: resource.size_bytes };
 }
 
 // ---------------------------------------------------------------------------

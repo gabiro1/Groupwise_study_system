@@ -8,13 +8,14 @@ import { parseNaturalLanguage, aiStatus } from "../services/ai.service.js";
 import {
   recommendationRequestSchema,
   recommendationFeedbackSchema,
+  recommendationWeightsSchema,
   aiIntentSchema,
   z,
-  idParamSchema,
 } from "../lib/schemas.js";
 import env from "../config/env.js";
 
 const router = Router();
+const recommendationIdParamSchema = z.object({ recommendationId: z.string().uuid() });
 
 // Every route in this file requires a signed-in account (student or admin),
 // and the role guards depend on `req.user`, so `requireAuth` runs first.
@@ -96,6 +97,7 @@ router.patch(
   "/weights",
   requireAdmin,
   writeLimiter,
+  validate({ body: recommendationWeightsSchema }),
   asyncHandler(async (req, res) => {
     const model = await recommendations.updateWeights(req.user.id, req.body);
     return ok(res, { model });
@@ -132,7 +134,7 @@ router.patch(
   requireStudent,
   writeLimiter,
   validate({
-    params: idParamSchema,
+    params: recommendationIdParamSchema,
     body: z.object({
       action: z.enum(["SHOWN", "CLICKED", "ACCEPTED", "REJECTED"]),
       reason: z
@@ -170,7 +172,7 @@ router.post(
   "/explain/:recommendationId",
   requireStudent,
   writeLimiter,
-  validate({ params: idParamSchema }),
+  validate({ params: recommendationIdParamSchema }),
   asyncHandler(async (req, res) => {
     const result = await recommendations.recommendationDetail(req.user.id, req.params.recommendationId);
     return ok(res, result);

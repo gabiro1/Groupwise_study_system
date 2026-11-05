@@ -53,7 +53,7 @@ function assertTransition(from, to) {
 async function notifyGroup(meeting, notification) {
   try {
     const members = await queryRows(
-      `SELECT student_id FROM study_group_members WHERE group_id = $1 AND left_at IS NULL`,
+       `SELECT student_id FROM study_group_members WHERE group_id = $1 AND left_at IS NULL AND status = 'ACTIVE'`,
       [meeting.group_id], "meetings:memberIds",
     );
     if (!members.length) return { delivered: 0, attempted: 0 };
@@ -155,11 +155,11 @@ export async function listMyMeetings(userId, opts = {}) {
   else if (scope === "cancelled") clauses.push(`m.status = 'CANCELLED'`);
   params.push(Math.min(limit, 100), Math.max(offset, 0));
   return queryRows(
-    `SELECT m.*, g.name AS group_name, u.first_name AS organizer_first_name, u.last_name AS organizer_last_name
-       FROM group_meetings m JOIN study_groups g ON g.id = m.group_id
-       JOIN study_group_members gm ON gm.group_id = g.id AND gm.student_id = $1
-       LEFT JOIN users u ON u.id = m.created_by
-      WHERE ${clauses.join(" AND ")}
+       `SELECT m.*, g.name AS group_name, u.first_name AS organizer_first_name, u.last_name AS organizer_last_name
+        FROM group_meetings m JOIN study_groups g ON g.id = m.group_id
+        JOIN study_group_members gm ON gm.group_id = g.id AND gm.student_id = $1
+        LEFT JOIN users u ON u.id = m.created_by
+       WHERE gm.left_at IS NULL AND gm.status = 'ACTIVE' AND g.status = 'ACTIVE' AND ${clauses.join(" AND ")}
       ORDER BY CASE WHEN m.status='LIVE' THEN 0 WHEN m.status='SCHEDULED' THEN 1 ELSE 2 END,
         m.scheduled_start ASC
       LIMIT $${params.length - 1} OFFSET $${params.length}`,

@@ -173,12 +173,12 @@ export default function UsersView() {
             value={q}
             onChange={(event) => setQ(event.target.value)}
           />
-          <select aria-label="Filter by role" value={role} onChange={(event) => setRole(event.target.value)}>
-            <option value="">All roles</option>
-            <option value="STUDENT">Student</option>
-            <option value="LECTURER">Lecturer</option>
-            <option value="ADMIN">Admin</option>
-          </select>
+            <select aria-label="Filter by role" value={role} onChange={(event) => setRole(event.target.value)}>
+              <option value="">All roles</option>
+              <option value="STUDENT">Student</option>
+              <option value="GROUP_LEADER">Group Leader</option>
+              <option value="ADMIN">Admin</option>
+            </select>
           <select aria-label="Filter by status" value={status} onChange={(event) => setStatus(event.target.value)}>
             <option value="">All statuses</option>
             <option value="ACTIVE">Active</option>
@@ -228,7 +228,7 @@ export default function UsersView() {
                           onChange={(event) => changeRole(user, event.target.value)}
                         >
                           <option value="STUDENT">Student</option>
-                          <option value="LECTURER">Lecturer</option>
+                          <option value="GROUP_LEADER">Group Leader</option>
                         </select>
                       )}
                     </td>

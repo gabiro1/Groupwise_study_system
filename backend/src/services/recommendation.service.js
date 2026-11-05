@@ -1,5 +1,5 @@
 import { query, queryRows, queryOne, withTransaction } from "../config/db.js";
-import { NotFoundError, AppError, ServiceUnavailableError } from "../lib/errors.js";
+import { NotFoundError, AppError, ConflictError, ServiceUnavailableError } from "../lib/errors.js";
 import {
   availabilityCompatibility,
   goalCompatibility,
@@ -55,10 +55,9 @@ async function ensureModelVersion() {
   );
 
   if (existing) {
-    let weights = existing.weights;
-    try {
-      weights = validateWeights(weights);
-    } catch {
+    const checked = validateWeights(existing.weights);
+    let weights;
+    if (!checked.valid) {
       // A hand-edited row with bad weights must not take the API down: fall back
       // to the code defaults and let an admin notice via the weights endpoint.
       weights = DEFAULT_WEIGHTS;
@@ -67,6 +66,8 @@ async function ensureModelVersion() {
         [existing.id, DEFAULT_WEIGHTS],
         "recs:repairWeights",
       );
+    } else {
+      weights = checked.normalized;
     }
     return { id: existing.id, weights };
   }
@@ -106,9 +107,10 @@ export async function generate(studentId, input) {
     input.kind === "GROUP" ? await loadGroupCandidates(requirements, input) : await loadStudentCandidates(requirements, input);
 
   const scored = candidates
-    .map((candidate) => scoreCandidate(requirements, candidate, model.weights, input))
+    .map((candidate) => scoreRecommendationCandidate(requirements, candidate, model.weights, input))
     .filter((entry) => entry.score >= MINIMUM_SCORE)
-    .sort((a, b) => b.score - a.score)
+    // Score is primary; the id tie-breaker keeps equal rounded scores stable.
+    .sort((a, b) => b.score - a.score || String(a.candidate.id).localeCompare(String(b.candidate.id)))
     .slice(0, input.limit ?? 20);
 
   // Persist only when asked. Speculative previews while typing should not
@@ -345,8 +347,8 @@ async function loadGroupCandidates(requirements, input) {
     // A group must be open in some sense: joinable, or requestable.
     "g.privacy IN ('PUBLIC', 'REQUEST_REQUIRED')",
     `NOT EXISTS (SELECT 1 FROM study_group_members m
-                  WHERE m.group_id = g.id AND m.student_id = ${bind(requirements.studentId)}
-                    AND m.left_at IS NULL)`,
+                   WHERE m.group_id = g.id AND m.student_id = ${bind(requirements.studentId)}
+                     AND m.left_at IS NULL AND m.status = 'ACTIVE')`,
   ];
 
   if (requirements.courseIds.size) {
@@ -383,7 +385,7 @@ async function loadGroupCandidates(requirements, input) {
           ORDER BY created_at DESC
           LIMIT 1
        ) w ON TRUE
-      WHERE ${clauses.join(" AND ")}
+      WHERE ${clauses.join(" AND ")} AND w.id IS NOT NULL
       ORDER BY g.activity_score DESC, g.created_at DESC
       LIMIT 200`,
     params,
@@ -412,7 +414,7 @@ async function loadGroupCandidates(requirements, input) {
       `SELECT m.group_id, st.topic_id, max(st.self_rating) AS best_rating
          FROM study_group_members m
          JOIN student_topics st ON st.student_id = m.student_id
-        WHERE m.group_id = ANY($1::uuid[]) AND m.left_at IS NULL
+         WHERE m.group_id = ANY($1::uuid[]) AND m.left_at IS NULL AND m.status = 'ACTIVE'
         GROUP BY m.group_id, st.topic_id`,
       [rows.map((row) => row.id)],
       "recs:groupStrengths",
@@ -420,7 +422,7 @@ async function loadGroupCandidates(requirements, input) {
   ]);
 
   const byGroup = new Map(
-    rows.map((row) => [row.id, { topics: new Map(), topicNames: {}, schedule: [], strengths: new Map() }]),
+    rows.map((row) => [row.id, { topics: new Map(), topicNames: {}, schedule: [], skillTopics: new Map() }]),
   );
 
   for (const row of topics) {
@@ -431,7 +433,7 @@ async function loadGroupCandidates(requirements, input) {
   }
   for (const row of schedules) byGroup.get(row.group_id)?.schedule.push(row);
   for (const row of strengths) {
-    byGroup.get(row.group_id)?.strengths.set(row.topic_id, { level: Number(row.best_rating ?? 0.5) });
+    byGroup.get(row.group_id)?.skillTopics.set(row.topic_id, { level: Number(row.best_rating ?? 0.5) });
   }
 
   return rows.map((row) => ({
@@ -439,7 +441,7 @@ async function loadGroupCandidates(requirements, input) {
     topics: byGroup.get(row.id).topics,
     topicNames: byGroup.get(row.id).topicNames,
     schedule: byGroup.get(row.id).schedule,
-    strengths: byGroup.get(row.id).strengths,
+    skillTopics: byGroup.get(row.id).skillTopics,
     daysSinceLastEvent: row.last_event_at
       ? (Date.now() - new Date(row.last_event_at).getTime()) / 86_400_000
       : null,
@@ -570,7 +572,7 @@ async function loadStudentCandidates(requirements, input) {
  * Score one candidate. Pure arithmetic — identical inputs always give the
  * identical score, which is what makes stored results reproducible.
  */
-function scoreCandidate(requirements, candidate, weights, input) {
+export function scoreRecommendationCandidate(requirements, candidate, weights, input = {}) {
   // A group candidate carries its single `course_id`, not a `courseIds` set, so
   // the shared-course count is derived from whichever shape is present. Without
   // this guard a group recommendation throws on `[...undefined]`.
@@ -582,7 +584,7 @@ function scoreCandidate(requirements, candidate, weights, input) {
         : new Set();
 
   const sharedCourses = [...candidateCourses].filter((id) => requirements.courseIds.has(id)).length;
-  const complementarity = skillComplementarity(requirements.topics, candidate.topics);
+  const complementarity = skillComplementarity(requirements.topics, candidate.skillTopics ?? candidate.topics);
   const availability = availabilityCompatibility(requirements.availability, candidate.availability ?? candidate.schedule);
   const preferences = preferenceCompatibility(requirements.preferences, {
     preferred_mode: candidate.mode ?? candidate.preferred_mode,
@@ -684,8 +686,24 @@ function describeMode(mine, theirs) {
  * Returns null rather than a fabricated score when either profile is too thin.
  */
 export async function pairCompatibility(studentIdA, studentIdB) {
+  if (studentIdA === studentIdB) return null;
+
   const [a, b] = await Promise.all([loadStudentProfile(studentIdA), loadStudentProfile(studentIdB)]);
   if (!a || !b) return null;
+
+  const visible = await queryOne(
+    `SELECT 1
+       FROM users u
+       LEFT JOIN privacy_settings ps ON ps.user_id = u.id
+      WHERE u.id = $1
+        AND u.deleted_at IS NULL
+        AND u.status = 'ACTIVE'
+        AND COALESCE(ps.discoverable, TRUE) = TRUE
+        AND COALESCE(ps.profile_visibility, 'STUDENTS') <> 'PRIVATE'`,
+    [studentIdB],
+    "recs:pairVisibility",
+  );
+  if (!visible) return null;
 
   const sharedCourses = [...b.courseIds].filter((id) => a.courseIds.has(id)).length;
   const complementarity = skillComplementarity(a.topics, b.topics);
@@ -725,16 +743,37 @@ export async function recordOutcome(studentId, recommendationId, action, { reaso
   const column = { SHOWN: "shown_at", CLICKED: "clicked_at", ACCEPTED: "accepted_at", REJECTED: "rejected_at" }[action];
   if (!column) throw new AppError("That is not a valid recommendation action.", { status: 400, code: "BAD_ACTION" });
 
+  const existing = await queryOne(
+    `SELECT id, kind, accepted_at, rejected_at
+       FROM recommendations
+      WHERE id = $1 AND student_id = $2`,
+    [recommendationId, studentId],
+    "recs:outcomeOwner",
+  );
+  if (!existing) throw new NotFoundError("That recommendation");
+
+  const terminalAction = existing.accepted_at ? "ACCEPTED" : existing.rejected_at ? "REJECTED" : null;
+  if (terminalAction) {
+    if (terminalAction === action) {
+      return {
+        recorded: true,
+        kind: existing.kind,
+        nextAction: action === "ACCEPTED" && existing.kind === "GROUP" ? "JOIN_GROUP" : null,
+      };
+    }
+    throw new ConflictError("That recommendation already has a final outcome.", { code: "OUTCOME_FINAL" });
+  }
+
   const row = await queryOne(
     `UPDATE recommendations SET ${column} = COALESCE(${column}, now()),
             dismissed_reason = CASE WHEN $4 = 'REJECTED' THEN $3 ELSE dismissed_reason END
-      WHERE id = $1 AND student_id = $2 AND ($3::text IS NULL OR dismissed_reason IS NULL)
+      WHERE id = $1 AND student_id = $2 AND accepted_at IS NULL AND rejected_at IS NULL
       RETURNING id, kind, target_student_id, target_workspace_id, request_id`,
     [recommendationId, studentId, reason ?? null, action],
     "recs:recordOutcome",
   );
 
-  if (!row) throw new NotFoundError("That recommendation");
+  if (!row) throw new ConflictError("That recommendation already has a final outcome.", { code: "OUTCOME_FINAL" });
 
   // Accepting a *group* recommendation should not silently join the group: that is
   // a separate, reversible action the student takes deliberately. Only a student
@@ -916,15 +955,22 @@ export async function parseIntent(studentId, text, eligible) {
  */
 export async function updateWeights(actorId, weights) {
   const validated = validateWeights(weights);
+  if (!validated.valid) {
+    throw new AppError("Recommendation weights are invalid.", {
+      status: 422,
+      code: "INVALID_RECOMMENDATION_WEIGHTS",
+      fields: Object.fromEntries(validated.errors.map((message, index) => [`weight${index + 1}`, message])),
+    });
+  }
   const model = await ensureModelVersion();
 
   await query(
     "UPDATE recommendation_model_versions SET weights = $2 WHERE id = $1",
-    [model.id, validated],
+    [model.id, validated.normalized],
     "recs:updateWeights",
   );
 
-  return { modelVersion: model.id, weights: validated, updatedBy: actorId };
+  return { modelVersion: model.id, weights: validated.normalized, updatedBy: actorId };
 }
 
 /** Active configuration, for display on the research and admin screens. */
@@ -937,7 +983,7 @@ export async function currentModel() {
     weights: model.weights,
     // Published so the UI can show students what the percentage is made of.
     weightExplanations: MODEL_METADATA.weightExplanations ?? {},
-    minimumScore: MINIMUM_SCORE,
+    minimumScore: MODEL_METADATA.config.minimumScore,
   };
 }
 

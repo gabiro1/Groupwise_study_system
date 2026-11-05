@@ -16,7 +16,7 @@ export const pool = new Pool({
   connectionString: env.DATABASE_URL,
   max: env.DATABASE_POOL_MAX,
   idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 10_000,
+  connectionTimeoutMillis: env.DATABASE_CONNECTION_TIMEOUT_MS,
   statement_timeout: env.DATABASE_STATEMENT_TIMEOUT_MS,
   application_name: env.APP_NAME,
   ssl: env.databaseSsl ? { rejectUnauthorized: env.databaseSslRejectUnauthorized } : undefined,

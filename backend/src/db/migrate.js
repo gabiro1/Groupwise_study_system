@@ -92,21 +92,47 @@ export async function runMigrations({ logger: log = logger } = {}) {
 }
 
 if (process.argv[1] && process.argv[1].endsWith("migrate.js")) {
-  runMigrations()
-    .then(async (results) => {
-      const applied = results.filter((r) => r.status === "applied");
-      // eslint-disable-next-line no-console
-      console.log(
-        applied.length
-          ? `Applied ${applied.length} migration(s): ${applied.map((r) => r.filename).join(", ")}`
-          : "Database is already up to date.",
-      );
-      await pool.end();
-    })
-    .catch(async (error) => {
-      // eslint-disable-next-line no-console
-      console.error("Migration failed:", error.message);
-      await pool.end();
-      process.exit(1);
-    });
+  const statusOnly = process.argv.includes("--status");
+
+  if (statusOnly) {
+    // `--status` is strictly read-only. Applying pending migrations from a
+    // command that advertises itself as a status check is a nasty surprise on a
+    // production database.
+    Promise.all([listMigrations(), appliedMigrations()])
+      .then(async ([files, applied]) => {
+        const pending = files.filter((name) => !applied.has(name));
+        // eslint-disable-next-line no-console
+        console.log(`Applied: ${applied.size} · Pending: ${pending.length}`);
+        // eslint-disable-next-line no-console
+        for (const name of files) {
+          // eslint-disable-next-line no-console
+          console.log(`  ${applied.has(name) ? "applied" : "pending"}  ${name}`);
+        }
+        await pool.end();
+      })
+      .catch(async (error) => {
+        // eslint-disable-next-line no-console
+        console.error("Could not read migration status:", error.message);
+        await pool.end();
+        process.exit(1);
+      });
+  } else {
+    runMigrations()
+      .then(async (results) => {
+        const applied = results.filter((r) => r.status === "applied");
+        // eslint-disable-next-line no-console
+        console.log(
+          applied.length
+            ? `Applied ${applied.length} migration(s): ${applied.map((r) => r.filename).join(", ")}`
+            : "Database is already up to date.",
+        );
+        await pool.end();
+      })
+      .catch(async (error) => {
+        // eslint-disable-next-line no-console
+        console.error("Migration failed:", error.message);
+        await pool.end();
+        process.exit(1);
+      });
+  }
 }

@@ -9,6 +9,8 @@ import { queryRows, queryOne } from "../config/db.js";
 import { NotFoundError } from "../lib/errors.js";
 import { assertWorkspaceAccess } from "../services/workspace.service.js";
 import { aiStatus, parseNaturalLanguage } from "../services/ai.service.js";
+import { aiRuntime } from "../services/settings.service.js";
+import { recordAiUsage } from "../services/aiConfig.service.js";
 import { callProvider } from "../modules/ai/orchestration.js";
 import {
   listConversations,
@@ -52,18 +54,58 @@ const router = Router();
 router.use(requireAuth);
 router.use(requireStudent);
 
+/**
+ * Time one provider-backed feature and record it in usage telemetry.
+ *
+ * Telemetry is best-effort and never rethrows its own failure, so a
+ * misconfigured telemetry table can never break an answer. Errors from the
+ * wrapped call still propagate to the shared error handler.
+ */
+async function measured(feature, actorId, fn) {
+  const startedAt = Date.now();
+  try {
+    const result = await fn();
+    await recordAiUsage({
+      feature,
+      status: "SUCCESS",
+      provider: result?.provider ?? null,
+      model: result?.model ?? result?.parserModel ?? null,
+      latencyMs: Date.now() - startedAt,
+      actorId,
+    });
+    return result;
+  } catch (error) {
+    await recordAiUsage({
+      feature,
+      status: "FAILURE",
+      latencyMs: Date.now() - startedAt,
+      errorCode: error.code ?? "AI_ERROR",
+      actorId,
+    });
+    throw error;
+  }
+}
+
 /** GET /api/ai/status — drives whether the UI shows AI affordances at all. */
 router.get(
   "/status",
   asyncHandler(async (_req, res) => {
+    const runtime = await aiRuntime();
+    const providerReady = env.aiEnabled;
+
+    // Capabilities reflect *both* provider readiness and the administrator's
+    // runtime switches: turning the assistant off in the console must hide it
+    // from students without a redeploy.
     return ok(res, {
       ai: aiStatus(),
-      // Plain-language capability list. The frontend uses the keys, the user never
-      // sees this object.
+      runtime: {
+        assistantEnabled: runtime.assistantEnabled,
+        matchingEnabled: runtime.matchingEnabled,
+      },
       capabilities: {
-        intentParsing: env.aiEnabled,
-        groundedAnswers: env.aiEnabled,
-        embeddings: env.aiEnabled,
+        intentParsing: providerReady && runtime.matchingEnabled,
+        groundedAnswers: providerReady && runtime.assistantEnabled,
+        embeddings: providerReady && runtime.matchingEnabled,
       },
     });
   }),
@@ -81,17 +123,21 @@ router.post(
   aiLimiter,
   validate({ body: aiIntentSchema }),
   asyncHandler(async (req, res) => {
-    if (!env.aiEnabled) {
+    const runtime = await aiRuntime();
+    if (!env.aiEnabled || !runtime.matchingEnabled) {
+      const reason = !env.aiEnabled ? "AI_DISABLED" : "FEATURE_DISABLED";
       return ok(res, {
         available: false,
-        reason: "AI_DISABLED",
+        reason,
         message: "Natural-language search is off in this environment. Use the filters instead.",
         intent: null,
       });
     }
 
     const eligible = await loadEligible(req.user.id, req.body);
-    const intent = await parseNaturalLanguage(req.body.text, eligible, req.user.id);
+    const intent = await measured("INTENT", req.user.id, () =>
+      parseNaturalLanguage(req.body.text, eligible, req.user.id),
+    );
 
     return ok(res, { available: true, intent });
   }),
@@ -114,11 +160,13 @@ router.post(
   validate({ body: aiChatSchema }),
   asyncHandler(async (req, res) => {
     const { workspaceId, message, resourceIds, useGroupContext } = req.body;
+    const runtime = await aiRuntime();
 
-    if (!env.aiEnabled) {
+    if (!env.aiEnabled || !runtime.assistantEnabled) {
+      const reason = !env.aiEnabled ? "AI_DISABLED" : "FEATURE_DISABLED";
       return ok(res, {
         available: false,
-        reason: "AI_DISABLED",
+        reason,
         message: "Ask is unavailable in this environment.",
         answer: null,
         sources: [],
@@ -155,7 +203,9 @@ router.post(
       });
     }
 
-    const answer = await answerFromContext(message, context);
+    const answer = await measured("ASSISTANT", req.user.id, () =>
+      answerFromContext(message, context, { timeoutMs: runtime.timeoutMs }),
+    );
     return ok(res, answer);
   }),
 );
@@ -171,14 +221,18 @@ router.post(
   aiLimiter,
   validate({ params: z.object({ resourceId: z.string().uuid() }) }),
   asyncHandler(async (req, res) => {
-    if (!env.aiEnabled) {
-      return ok(res, { available: false, reason: "AI_DISABLED", summary: null });
+    const runtime = await aiRuntime();
+    if (!env.aiEnabled || !runtime.assistantEnabled) {
+      const reason = !env.aiEnabled ? "AI_DISABLED" : "FEATURE_DISABLED";
+      return ok(res, { available: false, reason, summary: null });
     }
 
     const resource = await loadAccessibleResource(req.user.id, req.params.resourceId);
     if (!resource) throw new NotFoundError("That resource");
 
-    const summary = await summariseResource(resource);
+    const summary = await measured("SUMMARY", req.user.id, () =>
+      summariseResource(resource, { timeoutMs: runtime.timeoutMs }),
+    );
     return created(res, { available: true, ...summary });
   }),
 );
@@ -303,11 +357,14 @@ async function gatherContext({ userId, workspaceId, resourceIds, message }) {
     // Student-authored scope: a group the student is an active member of, or a
     // course they are enrolled in.
     `(
-      (r.workspace_id IS NOT NULL AND EXISTS (
-         SELECT 1 FROM workspaces w
-           JOIN study_group_members m ON m.group_id = w.group_id
-          WHERE w.id = r.workspace_id AND m.student_id = ${bind(userId)}
-            AND m.left_at IS NULL AND m.status = 'ACTIVE'))
+       (r.workspace_id IS NOT NULL AND EXISTS (
+           SELECT 1
+             FROM workspace_groups wg
+             JOIN workspaces rw ON rw.id = wg.workspace_id AND NOT rw.is_archived
+             JOIN study_groups g ON g.id = wg.group_id AND g.status = 'ACTIVE'
+             JOIN study_group_members m ON m.group_id = g.id
+           WHERE wg.workspace_id = r.workspace_id AND m.student_id = ${bind(userId)}
+             AND m.left_at IS NULL AND m.status = 'ACTIVE'))
       OR
       (r.course_id IS NOT NULL AND EXISTS (
          SELECT 1 FROM student_courses sc
@@ -334,14 +391,23 @@ async function gatherContext({ userId, workspaceId, resourceIds, message }) {
   );
 
   const recentMessages = workspaceId
-    ? await queryRows(
-        `SELECT m.id, m.body, m.kind, m.created_at, u.first_name
-           FROM messages m LEFT JOIN users u ON u.id = m.author_id
-          WHERE m.workspace_id = $1 AND m.deleted_at IS NULL AND m.kind <> 'AI'
-          ORDER BY m.created_at DESC LIMIT 15`,
-        [workspaceId],
-        "ai:groupMessages",
-      )
+     ? await queryRows(
+         `SELECT DISTINCT m.id, m.body, m.kind, m.created_at, u.first_name
+            FROM messages m
+            LEFT JOIN users u ON u.id = m.author_id
+            JOIN workspaces w ON w.id = m.workspace_id AND NOT w.is_archived
+            JOIN workspace_groups wg ON wg.workspace_id = w.id
+            JOIN study_groups g ON g.id = wg.group_id AND g.status = 'ACTIVE'
+           WHERE m.workspace_id = $1 AND m.deleted_at IS NULL AND m.kind <> 'AI'
+             AND EXISTS (
+               SELECT 1 FROM study_group_members gm
+                WHERE gm.group_id = g.id AND gm.student_id = $2
+                  AND gm.left_at IS NULL AND gm.status = 'ACTIVE'
+             )
+           ORDER BY m.created_at DESC LIMIT 15`,
+         [workspaceId, userId],
+         "ai:groupMessages",
+       )
     : [];
 
   // Relevance is a simple keyword overlap, not a vector search: with a handful of
@@ -382,6 +448,7 @@ async function buildPlatformSnapshot(userId) {
            JOIN study_groups g ON g.id = m.group_id
            LEFT JOIN courses c ON c.id = g.course_id
           WHERE m.student_id = $1 AND m.status = 'ACTIVE' AND m.left_at IS NULL
+            AND g.status = 'ACTIVE'
           ORDER BY m.last_active_at DESC NULLS LAST
           LIMIT 15`,
         [userId],
@@ -391,10 +458,11 @@ async function buildPlatformSnapshot(userId) {
         `SELECT ss.title, ss.starts_at, ss.mode, g.name AS group_name
            FROM study_sessions ss
            JOIN workspaces w ON w.id = ss.workspace_id
-           JOIN study_groups g ON g.id = w.group_id
+           JOIN workspace_groups wg ON wg.workspace_id = w.id
+           JOIN study_groups g ON g.id = wg.group_id AND g.status = 'ACTIVE'
            JOIN study_group_members m ON m.group_id = g.id
                 AND m.student_id = $1 AND m.status = 'ACTIVE' AND m.left_at IS NULL
-          WHERE ss.starts_at >= now() AND ss.status = 'SCHEDULED'
+          WHERE NOT w.is_archived AND ss.starts_at >= now() AND ss.status = 'SCHEDULED'
           ORDER BY ss.starts_at ASC
           LIMIT 5`,
         [userId],
@@ -491,7 +559,7 @@ function overlapScore(keywords, chunk) {
  * Sources are then filtered to those the response actually quotes, so the UI
  * shows no citation the answer did not use.
  */
-async function answerFromContext(message, context) {
+async function answerFromContext(message, context, { timeoutMs } = {}) {
   const contextBlocks = context.chunks.length
     ? context.chunks.map((entry, index) => `[${index + 1}] (resource: ${entry.resource.title})\n${entry.chunk}`)
     : [];
@@ -524,10 +592,13 @@ async function answerFromContext(message, context) {
     ...contextBlocks,
   ].join("\n");
 
-  const { text: response, model } = await callModel([
-    { role: "system", content: system },
-    { role: "user", content: message },
-  ]);
+  const { text: response, model } = await callModel(
+    [
+      { role: "system", content: system },
+      { role: "user", content: message },
+    ],
+    timeoutMs,
+  );
 
   const cited = new Set();
   for (const match of response.matchAll(/\[(\d+)\]/g)) {
@@ -573,7 +644,7 @@ async function answerFromContext(message, context) {
   };
 }
 
-async function summariseResource(resource) {
+async function summariseResource(resource, { timeoutMs } = {}) {
   const text = [resource.title, resource.description, resource.extracted_text]
     .filter(Boolean)
     .join("\n\n")
@@ -583,14 +654,17 @@ async function summariseResource(resource) {
     return { summary: null, reason: "NOTHING_TO_SUMMARISE" };
   }
 
-  const { text: summary, model } = await callModel([
-    {
-      role: "system",
-      content:
-        "Summarise this study material in at most 5 bullet points, then one line naming the single most likely exam topic. Plain text only.",
-    },
-    { role: "user", content: text },
-  ]);
+  const { text: summary, model } = await callModel(
+    [
+      {
+        role: "system",
+        content:
+          "Summarise this study material in at most 5 bullet points, then one line naming the single most likely exam topic. Plain text only.",
+      },
+      { role: "user", content: text },
+    ],
+    timeoutMs,
+  );
 
   return {
     summary,
@@ -602,11 +676,16 @@ async function summariseResource(resource) {
 /** Load one resource the student may read, or null. */
 async function loadAccessibleResource(userId, resourceId) {
   return queryOne(
-    `SELECT r.* FROM resources r
-      WHERE r.id = $1 AND r.is_deleted = FALSE AND (
-        (r.workspace_id IS NOT NULL AND EXISTS (
-           SELECT 1 FROM workspaces w JOIN study_group_members m ON m.group_id = w.group_id
-            WHERE w.id = r.workspace_id AND m.student_id = $2 AND m.left_at IS NULL AND m.status = 'ACTIVE'))
+      `SELECT r.* FROM resources r
+       LEFT JOIN workspaces w ON w.id = r.workspace_id
+       WHERE r.id = $1 AND r.is_deleted = FALSE AND (
+         (r.workspace_id IS NOT NULL AND w.is_archived = FALSE AND EXISTS (
+            SELECT 1
+             FROM workspace_groups wg
+             JOIN study_groups g ON g.id = wg.group_id AND g.status = 'ACTIVE'
+             JOIN study_group_members m ON m.group_id = g.id
+            WHERE wg.workspace_id = r.workspace_id AND m.student_id = $2
+              AND m.left_at IS NULL AND m.status = 'ACTIVE'))
         OR
         (r.course_id IS NOT NULL AND EXISTS (
            SELECT 1 FROM student_courses sc WHERE sc.course_id = r.course_id AND sc.student_id = $2))
@@ -623,8 +702,11 @@ async function loadAccessibleResource(userId, resourceId) {
  * so JSON mode is off here. Circuit breaking and provider selection live behind
  * `callProvider`, not in this file.
  */
-async function callModel(messages) {
-  return callProvider(messages, { jsonMode: false });
+async function callModel(messages, timeoutMs) {
+  return callProvider(messages, {
+    jsonMode: false,
+    ...(timeoutMs ? { timeoutMs } : {}),
+  });
 }
 
 export default router;

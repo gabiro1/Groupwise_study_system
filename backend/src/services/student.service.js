@@ -230,7 +230,7 @@ export async function getProfileBundle(studentId) {
            FROM study_group_members m
            JOIN study_groups g ON g.id = m.group_id
            JOIN courses c ON c.id = g.course_id
-          WHERE m.student_id = $1 AND m.left_at IS NULL AND g.status = 'ACTIVE'
+           WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE' AND g.status = 'ACTIVE'
           ORDER BY m.last_active_at DESC`,
         [studentId],
         "student:bundleGroups",
@@ -900,22 +900,24 @@ export async function summaryForStudent(studentId) {
       `SELECT
         (SELECT count(*)::int FROM study_group_members m
           JOIN study_groups g ON g.id = m.group_id
-         WHERE m.student_id = $1 AND m.left_at IS NULL AND g.status = 'ACTIVE') AS active_groups,
+         WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE' AND g.status = 'ACTIVE') AS active_groups,
         (SELECT count(*)::int FROM study_group_invitations i
          WHERE i.invitee_id = $1 AND i.status = 'PENDING' AND i.expires_at > now()) AS pending_group_invitations,
         (SELECT count(*)::int FROM study_group_join_requests jr
          WHERE jr.student_id = $1 AND jr.status = 'PENDING') AS pending_group_requests,
         (SELECT count(*)::int FROM partner_connections pc
          WHERE pc.recipient_id = $1 AND pc.status = 'PENDING') AS pending_partner_invitations,
-        (SELECT count(*)::int FROM study_group_members m
-          JOIN workspaces w ON w.group_id = m.group_id AND NOT w.is_archived
-          JOIN study_sessions ss ON ss.workspace_id = w.id
-         WHERE m.student_id = $1 AND m.left_at IS NULL
-           AND ss.status = 'SCHEDULED' AND ss.starts_at > now()) AS upcoming_sessions,
+         (SELECT count(*)::int FROM study_group_members m
+           JOIN study_groups g ON g.id = m.group_id AND g.status = 'ACTIVE'
+           JOIN workspace_groups wg ON wg.group_id = g.id
+           JOIN workspaces w ON w.id = wg.workspace_id AND NOT w.is_archived
+           JOIN study_sessions ss ON ss.workspace_id = w.id
+          WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
+            AND ss.status = 'SCHEDULED' AND ss.starts_at > now()) AS upcoming_sessions,
         (SELECT count(DISTINCT g.id)::int FROM study_group_members m
           JOIN study_groups g ON g.id = m.group_id AND g.status = 'ACTIVE'
-         WHERE m.student_id = $1 AND m.left_at IS NULL
-           AND m.role IN ('OWNER', 'MODERATOR')) AS leading_groups`,
+           WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
+            AND m.role IN ('OWNER', 'MODERATOR')) AS leading_groups`,
       [studentId],
       "student:summary",
     ),
