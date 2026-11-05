@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { backendUrl } from "../../backend-url";
 import { forwardSetCookies } from "../../cookies";
 import { applySetCookies, refreshSession } from "../refresh-session";
+import { backendApiUrl, backendConfigurationResponse } from "../../../../lib/backend-api";
 
 export async function GET(request) {
   const cookieStore = await cookies();
@@ -38,9 +38,18 @@ export async function GET(request) {
   }
 
   const refreshedCookie = applySetCookies(cookie, refreshResult.setCookies);
+  let sessionUrl;
+  try {
+    sessionUrl = backendApiUrl("auth/me");
+  } catch (error) {
+    const response = NextResponse.json(backendConfigurationResponse(error), { status: 503 });
+    forwardSetCookies(response, refreshResult.setCookies);
+    return response;
+  }
+
   let sessionResponse;
   try {
-    sessionResponse = await fetch(`${backendUrl}/api/auth/me`, {
+    sessionResponse = await fetch(sessionUrl, {
       headers: { cookie: refreshedCookie },
       cache: "no-store",
     });

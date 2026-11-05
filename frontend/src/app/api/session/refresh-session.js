@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { backendUrl } from "../backend-url";
+import { backendApiUrl } from "../../../lib/backend-api";
 
 const refreshOperations = new Map();
 const completedRefreshCacheMs = 5_000;
@@ -40,7 +40,16 @@ function apiError(status, code, message, setCookies = []) {
 }
 
 async function performRefresh(cookieHeader) {
-  const csrfResponse = await fetch(`${backendUrl}/api/auth/csrf`, {
+  let csrfUrl;
+  let refreshUrl;
+  try {
+    csrfUrl = backendApiUrl("auth/csrf");
+    refreshUrl = backendApiUrl("auth/refresh");
+  } catch {
+    return apiError(503, "BACKEND_NOT_CONFIGURED", "The Lien service is not configured correctly. Please contact support.");
+  }
+
+  const csrfResponse = await fetch(csrfUrl, {
     headers: { cookie: cookieHeader },
     cache: "no-store",
   });
@@ -56,7 +65,7 @@ async function performRefresh(cookieHeader) {
   }
 
   const cookieWithCsrf = applySetCookies(cookieHeader, csrfSetCookies);
-  const refreshResponse = await fetch(`${backendUrl}/api/auth/refresh`, {
+  const refreshResponse = await fetch(refreshUrl, {
     method: "POST",
     headers: {
       cookie: cookieWithCsrf,
