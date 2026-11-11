@@ -10,8 +10,8 @@ import { NotFoundError, ConflictError, ForbiddenError } from "../lib/errors.js";
 import { recordAudit, AUDIT } from "../lib/audit.js";
 import { notify, notifyMany } from "../lib/notifications.js";
 import { NOTIFICATION_TYPE } from "../config/constants.js";
-import { aiStatus } from "../services/ai.service.js";
-import { getTargets, configuredKeys, configuredEmbeddingModel } from "../modules/ai/registry.js";
+import * as aiConfig from "../services/aiConfig.service.js";
+import { getTargets, configuredKeys } from "../modules/ai/registry.js";
 import { getCircuitSnapshot, resetCircuit } from "../modules/ai/orchestration.js";
 import { buildPdf, sendPdf } from "../services/pdf.js";
 import { z } from "../lib/schemas.js";
@@ -870,29 +870,7 @@ function safeCircuitState(targetId) {
 /** GET /api/admin/ai/config — which providers are live, and their health. */
 router.get(
   "/ai/config",
-  asyncHandler(async (_req, res) => {
-    const status = aiStatus();
-    const chain = getTargets().map((target) => ({
-      id: target.id,
-      provider: target.provider,
-      label: target.label,
-      model: target.chatModel,
-      circuit: safeCircuitState(target.id),
-    }));
-
-    return ok(res, {
-      configured: status.configured,
-      primary: status.provider ? { provider: status.provider, model: status.model } : null,
-      providers: configuredKeys(),
-      embeddingModel: configuredEmbeddingModel(),
-      fallbacks: status.fallbacks,
-      required: false,
-      chain,
-      // Stated plainly so the UI can say it without hedging.
-      secretsExposed: false,
-      note: "API keys are configured through environment variables and are never returned to the browser.",
-    });
-  }),
+  asyncHandler(async (_req, res) => ok(res, await aiConfig.aiConfiguration())),
 );
 
 /** POST /api/admin/ai/providers/:id/reset — clear a tripped circuit breaker. */

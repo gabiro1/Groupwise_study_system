@@ -5,6 +5,8 @@ import { apiRequest, formatDateTime, labelFor } from "../adminApi";
 import PageHeading from "../PageHeading";
 import AdminModal from "../AdminModal";
 import { EmptyState, Skeleton } from "../DataState";
+import { motion, AnimatePresence, LayoutGroup } from "framer-motion";
+import { PlusIcon, SendIcon, ArchiveIcon, EditIcon, TrashIcon, MegaphoneIcon, GridIcon, LayersIcon, ListIcon } from "../AdminIcons";
 
 const PAGE_SIZE = 25;
 
@@ -72,6 +74,8 @@ export default function AnnouncementsView() {
   const [message, setMessage] = useState("");
   const [status, setStatus] = useState("");
   const [category, setCategory] = useState("");
+  const [cardLayout, setCardLayout] = useState("grid");
+  const [activeCard, setActiveCard] = useState(0);
 
   const [busyId, setBusyId] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
@@ -243,13 +247,19 @@ export default function AnnouncementsView() {
         subtitle="Create, publish, and archive platform-wide announcements."
         onRefresh={reload}
         refreshing={loading}
+        actions={<button className="admin-btn admin-btn-primary" type="button" onClick={openCreate}><PlusIcon size={15} /> Create announcement</button>}
       />
 
       {error && <div className="admin-banner admin-banner-error" role="alert">{error}</div>}
       {message && <div className="admin-banner admin-banner-success" role="status">{message}</div>}
 
-      <section className="admin-card">
-        <div className="admin-toolbar">
+      <section className="admin-card announcement-console">
+        <div className="announcement-intro">
+          <div className="announcement-intro-icon"><MegaphoneIcon size={20} /></div>
+          <div><strong>Platform communications</strong><p>Prepare updates for students and staff, then publish or schedule them.</p></div>
+          <div className="announcement-count"><span>{announcements.length}</span><small>shown</small></div>
+        </div>
+        <div className="announcement-toolbar admin-toolbar">
           <form className="admin-filter-form" onSubmit={applyFilters}>
             <select aria-label="Filter by status" value={status} onChange={(event) => setStatus(event.target.value)}>
               <option value="">All statuses</option>
@@ -262,11 +272,11 @@ export default function AnnouncementsView() {
             <button className="admin-btn admin-btn-primary" type="submit">Apply filters</button>
             <button className="admin-btn admin-btn-ghost" type="button" onClick={resetFilters}>Reset</button>
           </form>
-          <button className="admin-btn admin-btn-primary" type="button" onClick={openCreate}>
-            + Create announcement
-          </button>
         </div>
 
+        <div className="announcement-layout-toggle" role="group" aria-label="Announcement card layout">
+          {[['stack', LayersIcon], ['grid', GridIcon], ['list', ListIcon]].map(([mode, Icon]) => <button key={mode} type="button" className={cardLayout === mode ? "active" : ""} aria-label={`${mode} layout`} aria-pressed={cardLayout === mode} onClick={() => setCardLayout(mode)}><Icon size={16} /></button>)}
+        </div>
         {loading ? (
           <div className="admin-card-pad"><Skeleton rows={6} /></div>
         ) : announcements.length === 0 ? (
@@ -274,39 +284,40 @@ export default function AnnouncementsView() {
             <EmptyState title="No announcements" message="Create your first announcement above." />
           </div>
         ) : (
-          <div className="admin-card-body admin-card-body-flush">
-            {announcements.map((announcement) => (
-              <article key={announcement.id} className="admin-announcement-card">
+          <div className={`announcement-card-stage layout-${cardLayout}`}>
+            <LayoutGroup>
+              <motion.div layout className={`announcement-card-layout layout-${cardLayout}`}>
+                <AnimatePresence mode="popLayout">
+            {(cardLayout === "stack" ? [announcements[activeCard % announcements.length]] : announcements).map((announcement) => (
+              <motion.article layout key={announcement.id} className="admin-announcement-card announcement-card">
                 <div className="admin-announcement-head">
                   <div>
                     <strong>{announcement.title}</strong>
                     <div className="admin-announcement-meta">
-                      <span className={`admin-badge admin-badge-${announcement.status.toLowerCase()}`}>
-                        {labelFor("groupStatus", announcement.status) || announcement.status}
-                      </span>
-                      <span className="admin-badge admin-badge-muted">{announcement.category}</span>
-                      <span className="admin-badge admin-badge-muted">{announcement.audience}</span>
+                      <span className={`admin-badge admin-badge-${announcement.status.toLowerCase()}`}>{labelFor("announcementStatus", announcement.status)}</span>
+                      <span className="admin-badge admin-badge-muted">{labelFor("category", announcement.category)}</span>
+                      <span className="admin-badge admin-badge-muted">{labelFor("announcementAudience", announcement.audience)}</span>
                     </div>
                   </div>
                   <div className="admin-announcement-actions">
                     {canPublishAnnouncement(announcement) && (
-                      <button className="admin-btn admin-btn-ghost admin-btn-sm" type="button" onClick={() => publishAnnouncement(announcement)} disabled={busyId === `publish:${announcement.id}`}>
-                        Publish
+                        <button className="admin-btn admin-btn-ghost admin-btn-sm" type="button" onClick={() => publishAnnouncement(announcement)} disabled={busyId === `publish:${announcement.id}`}>
+                        <SendIcon size={13} /> Publish
                       </button>
                     )}
                     {announcement.status === "PUBLISHED" && (
                       <button className="admin-btn admin-btn-ghost admin-btn-sm" type="button" onClick={() => archiveAnnouncement(announcement.id)} disabled={busyId === `archive:${announcement.id}`}>
-                        Archive
+                        <ArchiveIcon size={13} /> Archive
                       </button>
                     )}
                     {(announcement.status === "DRAFT" || announcement.status === "ARCHIVED") && (
                       <button className="admin-btn admin-btn-danger admin-btn-sm" type="button" onClick={() => deleteAnnouncement(announcement.id)} disabled={busyId === `delete:${announcement.id}`}>
-                        Delete
+                        <TrashIcon size={13} /> Delete
                       </button>
                     )}
                     {EDITABLE_STATUSES.some((item) => item.key === announcement.status) && (
                       <button className="admin-btn admin-btn-ghost admin-btn-sm" type="button" onClick={() => openEdit(announcement)}>
-                        Edit
+                        <EditIcon size={13} /> Edit
                       </button>
                     )}
                   </div>
@@ -315,15 +326,19 @@ export default function AnnouncementsView() {
                 <div className="admin-announcement-foot">
                   <span className="admin-muted">
                     {announcement.created_by_first_name || announcement.created_by_last_name
-                      ? `By {[announcement.created_by_first_name, announcement.created_by_last_name].filter(Boolean).join(" ")}`
+                      ? `By ${[announcement.created_by_first_name, announcement.created_by_last_name].filter(Boolean).join(" ")}`
                       : "By system"}
                     {announcement.scheduled_for && ` · Scheduled ${formatDateTime(announcement.scheduled_for)}`}
                     {announcement.published_at && ` · Published ${formatDateTime(announcement.published_at)}`}
                     {announcement.delivered_count != null && ` · ${announcement.delivered_count} delivered`}
                   </span>
                 </div>
-              </article>
+              </motion.article>
             ))}
+                </AnimatePresence>
+              </motion.div>
+            </LayoutGroup>
+            {cardLayout === "stack" && announcements.length > 1 && <div className="announcement-stack-index"><button type="button" aria-label="Previous announcement" onClick={() => setActiveCard((index) => (index - 1 + announcements.length) % announcements.length)}>‹</button><span>{activeCard % announcements.length + 1} / {announcements.length}</span><button type="button" aria-label="Next announcement" onClick={() => setActiveCard((index) => (index + 1) % announcements.length)}>›</button><div className="announcement-stack-dots">{announcements.map((item, index) => <button key={item.id} type="button" aria-label={`Show announcement ${index + 1}`} className={index === activeCard % announcements.length ? "active" : ""} onClick={() => setActiveCard(index)} />)}</div></div>}
           </div>
         )}
       </section>

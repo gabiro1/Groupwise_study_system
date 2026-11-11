@@ -45,7 +45,7 @@ process.env.LOG_LEVEL = "silent";
 // Import after the environment is configured so env validation and the pool
 // use the test database. Dynamic import guarantees the ordering above.
 const { createApp } = await import("../src/config/app.js");
-const { pool, query, queryOne, closePool } = await import("../src/config/db.js");
+const { pool, query, queryOne, queryRows, closePool } = await import("../src/config/db.js");
 const { signAccessToken } = await import("../src/lib/tokens.js");
 const { hashPassword } = await import("../src/lib/crypto.js");
 const { ROLES } = await import("../src/config/constants.js");
@@ -476,6 +476,58 @@ describe("F. filing a report requires authentication", () => {
 // G. Group leadership and ownership authorization
 // ===========================================================================
 describe("G. group owner-only operations", () => {
+  it("an administrator can review and admit a pending join request", async () => {
+    const fx = await createGroupFixture();
+
+    const detail = await call("GET", `/api/admin/groups/${fx.groupId}`, { token: tokenFor(admin) });
+    assert.equal(detail.status, 200, JSON.stringify(detail.body));
+    assert.equal(detail.body.data.joinRequests.length, 1);
+    assert.equal(detail.body.data.joinRequests[0].id, fx.requestId);
+
+    const admitted = await call("POST", `/api/admin/groups/${fx.groupId}/requests/${fx.requestId}/decide`, {
+      token: tokenFor(admin),
+      body: { decision: "APPROVE", note: "Leader support admission test" },
+    });
+    assert.equal(admitted.status, 200, JSON.stringify(admitted.body));
+    assert.equal(admitted.body.data.admitted, true);
+
+    const state = await queryOne(
+      `SELECT jr.status AS request_status, m.status AS member_status, m.joined_via,
+              a.action, a.actor_id
+         FROM study_group_join_requests jr
+         JOIN study_group_members m ON m.group_id = jr.group_id AND m.student_id = jr.student_id
+         LEFT JOIN audit_logs a ON a.entity_type = 'study_group' AND a.entity_id = jr.group_id::text
+                              AND a.action = 'admin.group.join_request.decided'
+        WHERE jr.id = $1
+        ORDER BY a.created_at DESC
+        LIMIT 1`,
+      [fx.requestId],
+      "test:adminAdmitState",
+    );
+    assert.equal(state.request_status, "APPROVED");
+    assert.equal(state.member_status, "ACTIVE");
+    assert.equal(state.joined_via, "JOIN_REQUEST");
+    assert.equal(state.action, "admin.group.join_request.decided");
+    assert.equal(state.actor_id, admin.id);
+  });
+
+  it("a non-administrator cannot use the administrator admission endpoint", async () => {
+    const fx = await createGroupFixture();
+
+    const denied = await call("POST", `/api/admin/groups/${fx.groupId}/requests/${fx.requestId}/decide`, {
+      token: tokenFor(fx.owner),
+      body: { decision: "APPROVE" },
+    });
+    assert.equal(denied.status, 403);
+
+    const request = await queryOne(
+      "SELECT status FROM study_group_join_requests WHERE id = $1",
+      [fx.requestId],
+      "test:adminAdmissionDeniedState",
+    );
+    assert.equal(request.status, "PENDING");
+  });
+
   it("approving a join request: member is forbidden, owner succeeds", async () => {
     const fx = await createGroupFixture();
 
@@ -940,6 +992,64 @@ describe("K. report moderation is target-bound and transactional", () => {
 // L. admin edits revoke sessions and reset verification
 // ===========================================================================
 describe("L. administrator account changes invalidate sessions", () => {
+  it("soft-deletes a non-administrator account and revokes access", async () => {
+    const target = await createUser(ROLES.STUDENT, "delete-target");
+
+    const response = await call("DELETE", `/api/admin/users/${target.id}`, {
+      token: tokenFor(admin),
+      body: { reason: "Account removal integration test" },
+    });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.equal(response.body.data.deleted, true);
+
+    const state = await queryOne(
+      `SELECT u.status, u.deleted_at, s.revoked_at, s.revoked_reason, a.action, a.actor_id
+         FROM users u
+         JOIN auth_sessions s ON s.user_id = u.id
+         LEFT JOIN audit_logs a ON a.entity_type = 'user' AND a.entity_id = u.id::text
+                              AND a.action = 'admin.account.deleted'
+        WHERE u.id = $1
+        ORDER BY a.created_at DESC
+        LIMIT 1`,
+      [target.id],
+      "test:adminDeleteState",
+    );
+    assert.equal(state.status, "DEACTIVATED");
+    assert.ok(state.deleted_at);
+    assert.ok(state.revoked_at);
+    assert.equal(state.revoked_reason, "admin_delete");
+    assert.equal(state.action, "admin.account.deleted");
+    assert.equal(state.actor_id, admin.id);
+  });
+
+  it("archives groups owned by an account before deleting it", async () => {
+    const fx = await createGroupFixture();
+    const response = await call("DELETE", `/api/admin/users/${fx.owner.id}`, {
+      token: tokenFor(admin),
+      body: { reason: "Remove owner and preserve group history" },
+    });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.equal(response.body.data.groupsArchived, 1);
+
+    const state = await queryOne(
+      `SELECT g.status, w.is_archived, jr.status AS request_status,
+              m.status AS membership_status, m.left_at
+         FROM study_groups g
+         LEFT JOIN workspace_groups wg ON wg.group_id = g.id
+         LEFT JOIN workspaces w ON w.id = wg.workspace_id
+         LEFT JOIN study_group_join_requests jr ON jr.id = $2
+         LEFT JOIN study_group_members m ON m.group_id = g.id AND m.student_id = $3
+        WHERE g.id = $1`,
+      [fx.groupId, fx.requestId, fx.owner.id],
+      "test:deleteOwnerGroupState",
+    );
+    assert.equal(state.status, "ARCHIVED");
+    assert.equal(state.is_archived, true);
+    assert.equal(state.request_status, "CANCELLED");
+    assert.equal(state.membership_status, "DEACTIVATED");
+    assert.ok(state.left_at);
+  });
+
   it("revokes sessions on a role change", async () => {
     const target = await createUser(ROLES.STUDENT, "role-edit");
     const response = await call("POST", `/api/admin/users/${target.id}/role`, {
@@ -991,6 +1101,25 @@ describe("L. administrator account changes invalidate sessions", () => {
     assert.equal(oldToken.status, 401);
   });
 
+  it("allows an administrator to update their own profile details", async () => {
+    const self = await createUser(ROLES.ADMIN, "self-profile-edit");
+    const response = await call("PATCH", `/api/admin/users/${self.id}`, {
+      token: tokenFor(self),
+      body: { firstName: "Updated", lastName: "Administrator" },
+    });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.equal(response.body.data.user.first_name, "Updated");
+    assert.equal(response.body.data.user.last_name, "Administrator");
+
+    const user = await queryOne(
+      "SELECT first_name, last_name FROM users WHERE id = $1",
+      [self.id],
+      "test:selfProfileEdit",
+    );
+    assert.equal(user.first_name, "Updated");
+    assert.equal(user.last_name, "Administrator");
+  });
+
   it("revokes sessions even when the legacy suspendSessions flag is false", async () => {
     const target = await createUser(ROLES.STUDENT, "suspend-session");
     const response = await call("POST", "/api/admin/users/suspend", {
@@ -1004,6 +1133,22 @@ describe("L. administrator account changes invalidate sessions", () => {
 
   it("rejects demoting the last active administrator", async () => {
     const target = await createUser(ROLES.ADMIN, "last-admin-target");
+    // The shared test seed contains a demo administrator. Preserve every
+    // existing admin's state while making this fixture genuinely represent a
+    // platform with only one active administrator: the target under test.
+    const otherAdmins = await queryRows(
+      `SELECT u.id, u.status, u.email_verified_at
+         FROM users u JOIN roles r ON r.id = u.role_id
+        WHERE r.key = 'ADMIN' AND u.deleted_at IS NULL AND u.id <> $1`,
+      [target.id],
+      "test:lastAdminOtherAdmins",
+    );
+    await query(
+      `UPDATE users SET status = 'PENDING_VERIFICATION', email_verified_at = NULL
+        WHERE id = ANY($1::uuid[])`,
+      [otherAdmins.map((row) => row.id)],
+      "test:makeOtherAdminsNonActive",
+    );
     await query(
       "UPDATE users SET status = 'PENDING_VERIFICATION' WHERE id = $1",
       [admin.id],
@@ -1023,11 +1168,13 @@ describe("L. administrator account changes invalidate sessions", () => {
       );
       assert.equal(row.role, ROLES.ADMIN);
     } finally {
-      await query(
-        "UPDATE users SET status = 'ACTIVE', email_verified_at = now() WHERE id = $1",
-        [admin.id],
-        "test:restoreAdminState",
-      );
+      for (const otherAdmin of otherAdmins) {
+        await query(
+          "UPDATE users SET status = $2, email_verified_at = $3 WHERE id = $1",
+          [otherAdmin.id, otherAdmin.status, otherAdmin.email_verified_at],
+          "test:restoreOtherAdminState",
+        );
+      }
     }
   });
 });

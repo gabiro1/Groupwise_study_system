@@ -1,409 +1,111 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest } from "../adminApi";
-import PageHeading from "../PageHeading";
+import AdminModal from "../AdminModal";
 import { EmptyState, ErrorState, Skeleton } from "../DataState";
+import {
+  ChartIcon, CheckIcon, CloseIcon, EditIcon, PlusIcon,
+  RefreshIcon, SettingsIcon, ShieldIcon, SparklesIcon, TrashIcon,
+} from "../AdminIcons";
 
-const DEFAULT_RUNTIME = {
-  assistantEnabled: true,
-  matchingEnabled: true,
-  maxRequestsPerHour: 60,
-  timeoutMs: 25_000,
-};
+const DEFAULT_RUNTIME = { assistantEnabled: true, matchingEnabled: true, maxRequestsPerHour: 60, timeoutMs: 25000, maxFailoverAttempts: 3, fallbackEnabled: true, failureThreshold: 3, recoveryCooldownMs: 30000 };
+const DEFAULT_WEB = { enabled: false, defaultMode: "LOCAL", maxQueries: 2, maxResults: 8, timeoutMs: 10000, maxContextChars: 24000, cacheTtlMin: 30, maxRequestsPerHour: 20, country: "RW", language: "en", safeSearch: "strict", allowlistDomains: [], blocklistDomains: [] };
+const PROVIDER_DEFAULTS = { OPENAI: "https://api.openai.com/v1", GEMINI: "https://generativelanguage.googleapis.com/v1beta", OPENROUTER: "https://openrouter.ai/api/v1", CUSTOM_OPENAI: "", ANTHROPIC: "https://api.anthropic.com" };
+const EMPTY_PROVIDER = { displayName: "", providerType: "OPENAI", apiCredential: "", baseUrl: PROVIDER_DEFAULTS.OPENAI, modelId: "", modelDisplayName: "", priority: 100, timeoutMs: 25000, enabled: true, fallbackEnabled: true };
+const TABS = [["providers", "Providers", SparklesIcon], ["failover", "Failover", ShieldIcon], ["runtime", "Runtime", SettingsIcon], ["usage", "Usage", ChartIcon]];
+
+function statusClass(status) { return ["OPERATIONAL", "CLOSED"].includes(status) ? "admin-badge-active" : ["INVALID", "OPEN"].includes(status) ? "admin-badge-danger" : "admin-badge-muted"; }
+function providerLabel(type) { return { OPENAI: "OpenAI", GEMINI: "Google Gemini", OPENROUTER: "OpenRouter", CUSTOM_OPENAI: "Custom OpenAI-compatible", ANTHROPIC: "Anthropic" }[type] || type; }
+function ProviderIcon({ type }) { return <span className="ai-provider-mark" aria-hidden="true">{type === "GEMINI" ? "✦" : type === "OPENROUTER" ? "↗" : type === "ANTHROPIC" ? "A" : "◈"}</span>; }
 
 export default function AIConfigView() {
-  const [config, setConfig] = useState(null);
-  const [usage, setUsage] = useState(null);
-  const [chain, setChain] = useState(null);
-  const [runtimeDraft, setRuntimeDraft] = useState(DEFAULT_RUNTIME);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
-
-  const [range, setRange] = useState(30);
-  const [runtimeBusy, setRuntimeBusy] = useState(false);
-  const [testBusy, setTestBusy] = useState(false);
-  const [testResult, setTestResult] = useState(null);
+  const [config, setConfig] = useState(null); const [usage, setUsage] = useState(null); const [chain, setChain] = useState([]);
+  const [runtimeDraft, setRuntimeDraft] = useState(DEFAULT_RUNTIME); const [webDraft, setWebDraft] = useState(DEFAULT_WEB); const [activeTab, setActiveTab] = useState("providers");
+  const [providerQuery, setProviderQuery] = useState(""); const [providerFilter, setProviderFilter] = useState("ALL"); const [providerModal, setProviderModal] = useState(false);
+  const [providerDraft, setProviderDraft] = useState(EMPTY_PROVIDER); const [editingProviderId, setEditingProviderId] = useState(null); const [models, setModels] = useState([]); const [modelQuery, setModelQuery] = useState("");
+  const [modelsBusy, setModelsBusy] = useState(false); const [providerBusy, setProviderBusy] = useState(false); const [loading, setLoading] = useState(true); const [error, setError] = useState(""); const [message, setMessage] = useState("");
+  const [range, setRange] = useState(30); const [runtimeBusy, setRuntimeBusy] = useState(false); const [webBusy, setWebBusy] = useState(false); const [testBusy, setTestBusy] = useState(""); const [testResult, setTestResult] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [cfg, usageResult, chainResult] = await Promise.all([
-        apiRequest("admin/ai/config"),
-        apiRequest(`admin/ai/usage?range=${range}`),
-        apiRequest("admin/ai/chain"),
-      ]);
-      const nextConfig = cfg?.config ?? cfg ?? {};
-      const nextChain = Array.isArray(chainResult)
-        ? chainResult
-        : chainResult?.chain ?? nextConfig.chain ?? [];
-      const nextRuntime = nextConfig.runtime ?? usageResult?.configuration?.runtime ?? {};
-      setConfig({ ...nextConfig, runtime: nextRuntime });
-      setRuntimeDraft({ ...DEFAULT_RUNTIME, ...nextRuntime });
-      setUsage(usageResult?.report ?? usageResult ?? null);
-      setChain(nextChain);
-      setError("");
-    } catch (requestError) {
-      setError(requestError.message);
-    } finally {
-      setLoading(false);
-    }
+      const [cfg, usageResult, chainResult] = await Promise.all([apiRequest("admin/ai/config"), apiRequest(`admin/ai/usage?range=${range}`), apiRequest("admin/ai/chain")]);
+      const nextConfig = cfg?.config ?? cfg ?? {}; const nextRuntime = nextConfig.runtime ?? {};
+      setConfig(nextConfig); setRuntimeDraft({ ...DEFAULT_RUNTIME, ...nextRuntime }); setWebDraft({ ...DEFAULT_WEB, ...(nextConfig.webSearch || {}) });
+      setUsage(usageResult?.report ?? usageResult ?? null); setChain(Array.isArray(chainResult) ? chainResult : chainResult?.chain ?? nextConfig.chain ?? []); setError("");
+    } catch (requestError) { setError(requestError.message); } finally { setLoading(false); }
   }, [range]);
+  useEffect(() => { const timer = window.setTimeout(() => { void load(); }, 0); return () => window.clearTimeout(timer); }, [load]);
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => { void load(); }, 0);
-    return () => window.clearTimeout(timer);
-  }, [load]);
+  function openCreate() { setEditingProviderId(null); setProviderDraft({ ...EMPTY_PROVIDER }); setModels([]); setModelQuery(""); setProviderModal(true); }
+  function openEdit(provider) { setEditingProviderId(provider.id); setProviderDraft({ displayName: provider.displayName, providerType: provider.providerType, apiCredential: "", baseUrl: provider.baseUrl, modelId: provider.modelId, modelDisplayName: provider.modelDisplayName || "", priority: provider.priority, timeoutMs: provider.timeoutMs, enabled: provider.enabled, fallbackEnabled: provider.fallbackEnabled, hasCredential: provider.hasCredential, removeCredential: false }); setModels([]); setModelQuery(""); setProviderModal(true); }
+  function updateDraft(key, value) { setProviderDraft((current) => ({ ...current, [key]: value })); }
+  function changeProviderType(event) { const providerType = event.target.value; setProviderDraft((current) => ({ ...current, providerType, baseUrl: current.baseUrl === PROVIDER_DEFAULTS[current.providerType] || !current.baseUrl ? PROVIDER_DEFAULTS[providerType] : current.baseUrl })); }
 
-  function reload() {
-    void load();
-  }
-
-  async function saveRuntime() {
-    const maxRequestsPerHour = Number(runtimeDraft.maxRequestsPerHour);
-    const timeoutMs = Number(runtimeDraft.timeoutMs);
-    if (!Number.isInteger(maxRequestsPerHour) || maxRequestsPerHour < 1 || maxRequestsPerHour > 1000) {
-      setError("Requests per hour must be a whole number from 1 to 1,000.");
-      return;
-    }
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120_000) {
-      setError("Timeout must be a whole number from 1,000 to 120,000 milliseconds.");
-      return;
-    }
-
-    setRuntimeBusy(true);
-    setError("");
+  async function saveProvider(event) {
+    event.preventDefault();
+    if (!editingProviderId && !providerDraft.apiCredential.trim()) { setError("Add an API credential before saving a provider."); return; }
+    setProviderBusy(true); setError("");
     try {
-      const result = await apiRequest("admin/ai/config", {
-        method: "PATCH",
-        body: JSON.stringify({
-          assistantEnabled: Boolean(runtimeDraft.assistantEnabled),
-          matchingEnabled: Boolean(runtimeDraft.matchingEnabled),
-          maxRequestsPerHour,
-          timeoutMs,
-        }),
-      });
-      const nextConfig = result?.config ?? result ?? {};
-      const nextRuntime = nextConfig.runtime ?? {
-        assistantEnabled: Boolean(runtimeDraft.assistantEnabled),
-        matchingEnabled: Boolean(runtimeDraft.matchingEnabled),
-        maxRequestsPerHour,
-        timeoutMs,
-      };
-      setConfig({ ...nextConfig, runtime: nextRuntime });
-      setRuntimeDraft({ ...DEFAULT_RUNTIME, ...nextRuntime });
-      setMessage("AI runtime controls saved.");
-    } catch (requestError) {
-      setError(requestError.message);
-    } finally {
-      setRuntimeBusy(false);
-    }
+      const payload = { displayName: providerDraft.displayName.trim(), providerType: providerDraft.providerType, baseUrl: providerDraft.baseUrl.trim(), modelId: providerDraft.modelId.trim(), modelDisplayName: providerDraft.modelDisplayName.trim() || null, priority: Number(providerDraft.priority), timeoutMs: Number(providerDraft.timeoutMs), enabled: Boolean(providerDraft.enabled), fallbackEnabled: Boolean(providerDraft.fallbackEnabled) };
+      if (providerDraft.apiCredential.trim()) payload.apiCredential = providerDraft.apiCredential.trim(); if (editingProviderId && providerDraft.removeCredential) payload.removeCredential = true;
+      const result = await apiRequest(editingProviderId ? `admin/ai/providers/${editingProviderId}` : "admin/ai/providers", { method: editingProviderId ? "PATCH" : "POST", body: JSON.stringify(payload) });
+      setProviderModal(false); setMessage(editingProviderId ? "Provider configuration updated." : "Provider added to the failover chain."); await load();
+      if (result?.provider) setConfig((current) => ({ ...current, providers: [...(current?.providers || []).filter((item) => item.id !== result.provider.id), result.provider] }));
+    } catch (requestError) { setError(requestError.message); } finally { setProviderBusy(false); }
   }
+  async function removeProvider(provider) { if (!window.confirm(`Remove ${provider.displayName}? Its usage history will be kept, but it will no longer be available for AI requests.`)) return; setProviderBusy(provider.id); try { await apiRequest(`admin/ai/providers/${provider.id}`, { method: "DELETE" }); setMessage("Provider removed."); await load(); } catch (requestError) { setError(requestError.message); } finally { setProviderBusy(""); } }
+  async function testProvider(provider) { setTestBusy(provider?.id || "chain"); setTestResult(null); try { const result = await apiRequest(provider ? `admin/ai/providers/${provider.id}/test` : "admin/ai/test", { method: "POST", body: "{}" }); const probe = result?.result ?? result; setTestResult(probe); setMessage(probe.ok ? "Provider responded successfully." : "Provider test failed."); if (provider) await load(); } catch (requestError) { setError(requestError.message); } finally { setTestBusy(""); } }
+  async function discoverModels() { if (!editingProviderId) { setError("Save the provider first, then fetch models from its endpoint."); return; } setModelsBusy(true); setError(""); try { const result = await apiRequest(`admin/ai/providers/${editingProviderId}/models`, { method: "POST", body: "{}" }); setModels(result.models || []); setMessage(`${result.models?.length || 0} available model${result.models?.length === 1 ? "" : "s"} found.`); } catch (requestError) { setError(requestError.message); } finally { setModelsBusy(false); } }
+  async function resetCircuit(id) { try { await apiRequest(`admin/ai/chain/${encodeURIComponent(id)}/reset`, { method: "POST", body: "{}" }); setMessage("Circuit breaker reset."); await load(); } catch (requestError) { setError(requestError.message); } }
+  async function saveRuntime() { setRuntimeBusy(true); setError(""); try { const payload = { assistantEnabled: Boolean(runtimeDraft.assistantEnabled), matchingEnabled: Boolean(runtimeDraft.matchingEnabled), maxRequestsPerHour: Number(runtimeDraft.maxRequestsPerHour), timeoutMs: Number(runtimeDraft.timeoutMs), maxFailoverAttempts: Number(runtimeDraft.maxFailoverAttempts), fallbackEnabled: Boolean(runtimeDraft.fallbackEnabled), failureThreshold: Number(runtimeDraft.failureThreshold), recoveryCooldownMs: Number(runtimeDraft.recoveryCooldownMs) }; const result = await apiRequest("admin/ai/config", { method: "PATCH", body: JSON.stringify(payload) }); const nextConfig = result?.config ?? result ?? {}; setConfig((current) => ({ ...current, ...nextConfig })); setRuntimeDraft({ ...DEFAULT_RUNTIME, ...(nextConfig.runtime || payload) }); setMessage("AI runtime and failover controls saved."); } catch (requestError) { setError(requestError.message); } finally { setRuntimeBusy(false); } }
+  async function saveWeb() { setWebBusy(true); setError(""); try { const web = { ...webDraft, maxQueries: Number(webDraft.maxQueries), maxResults: Number(webDraft.maxResults), timeoutMs: Number(webDraft.timeoutMs), maxContextChars: Number(webDraft.maxContextChars), cacheTtlMin: Number(webDraft.cacheTtlMin), maxRequestsPerHour: Number(webDraft.maxRequestsPerHour), country: String(webDraft.country || "RW").toUpperCase(), language: String(webDraft.language || "en").toLowerCase(), allowlistDomains: Array.isArray(webDraft.allowlistDomains) ? webDraft.allowlistDomains : [], blocklistDomains: Array.isArray(webDraft.blocklistDomains) ? webDraft.blocklistDomains : [] }; await apiRequest("admin/ai/config", { method: "PATCH", body: JSON.stringify({ web }) }); setMessage("Web research policy saved."); await load(); } catch (requestError) { setError(requestError.message); } finally { setWebBusy(false); } }
 
-  async function testProvider() {
-    setTestBusy(true);
-    setTestResult(null);
-    try {
-      const result = await apiRequest("admin/ai/test", { method: "POST", body: "{}" });
-      const probe = result?.result ?? result ?? { ok: false, message: "The provider returned no test result." };
-      setTestResult(probe);
-      setMessage(probe.ok ? "Provider responded successfully." : "Provider test failed.");
-    } catch (requestError) {
-      setError(requestError.message);
-    } finally {
-      setTestBusy(false);
-    }
-  }
+  const providers = config?.providers || [];
+  const filteredProviders = useMemo(() => providers.filter((provider) => { const matchesQuery = !providerQuery.trim() || `${provider.displayName} ${provider.modelId} ${provider.providerType}`.toLowerCase().includes(providerQuery.toLowerCase()); const matchesFilter = providerFilter === "ALL" || (providerFilter === "ENABLED" ? provider.enabled : provider.operationalStatus === providerFilter); return matchesQuery && matchesFilter; }), [providers, providerQuery, providerFilter]);
+  const visibleModels = models.filter((model) => `${model.id} ${model.displayName}`.toLowerCase().includes(modelQuery.toLowerCase()));
+  if (!config && error) return <ErrorState message={error} onRetry={() => void load()} />;
 
-  const data = config;
-  const usageData = usage;
-  const chainData = Array.isArray(chain) ? chain : [];
-
-  if (!data && error) {
-    return (
-      <>
-        <PageHeading title="AI Configuration" subtitle="Manage AI providers and usage." />
-        <ErrorState message={error} onRetry={reload} />
-      </>
-    );
-  }
-
-  return (
-    <>
-      <PageHeading
-        title="AI Configuration"
-        subtitle="Configure AI providers, monitor usage, and test connectivity."
-        onRefresh={reload}
-        refreshing={loading}
-      />
-
-      {error && <div className="admin-banner admin-banner-error" role="alert">{error}</div>}
-      {message && <div className="admin-banner admin-banner-success" role="status">{message}</div>}
-
-      {loading && <div className="admin-card-pad"><Skeleton rows={6} /></div>}
-
-      {!loading && (
-        <>
-          <section className="admin-card">
-            <header className="admin-card-head">
-              <div>
-                <h2>Provider status</h2>
-                <p>AI provider readiness and feature toggles.</p>
-              </div>
-            </header>
-            <div className="admin-card-body admin-card-body-flush">
-              <div className="admin-status-grid">
-                <div className="admin-status-item">
-                  <strong>Configured</strong>
-                  <span className={`admin-badge ${data?.configured ? "admin-badge-active" : "admin-badge-muted"}`}>
-                    {data?.configured ? "Yes" : "No"}
-                  </span>
-                </div>
-                <div className="admin-status-item">
-                  <strong>Primary provider</strong>
-                  <span>{data?.primary?.provider || "None"}</span>
-                </div>
-                <div className="admin-status-item">
-                  <strong>Primary model</strong>
-                  <span>{data?.primary?.model || "—"}</span>
-                </div>
-                <div className="admin-status-item">
-                  <strong>Embedding model</strong>
-                  <span>{data?.embeddingModel || "—"}</span>
-                </div>
-                <div className="admin-status-item">
-                  <strong>Fallbacks</strong>
-                  <span>{data?.fallbacks ?? 0}</span>
-                </div>
-                <div className="admin-status-item">
-                  <strong>Secrets exposed</strong>
-                  <span className={`admin-badge ${data?.secretsExposed ? "admin-badge-danger" : "admin-badge-active"}`}>
-                    {data?.secretsExposed ? "Yes" : "No"}
-                  </span>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section className="admin-card">
-            <header className="admin-card-head">
-              <div>
-                <h2>Runtime controls</h2>
-                <p>Turn AI features off or adjust their request budget without changing provider credentials.</p>
-              </div>
-            </header>
-            <div className="admin-card-body">
-              <div className="admin-field-grid">
-                <label className="admin-field">
-                  <span>Assistant</span>
-                  <select
-                    value={runtimeDraft.assistantEnabled ? "true" : "false"}
-                    onChange={(event) => setRuntimeDraft((current) => ({ ...current, assistantEnabled: event.target.value === "true" }))}
-                    disabled={runtimeBusy}
-                  >
-                    <option value="true">Enabled</option>
-                    <option value="false">Disabled</option>
-                  </select>
-                </label>
-                <label className="admin-field">
-                  <span>Matching</span>
-                  <select
-                    value={runtimeDraft.matchingEnabled ? "true" : "false"}
-                    onChange={(event) => setRuntimeDraft((current) => ({ ...current, matchingEnabled: event.target.value === "true" }))}
-                    disabled={runtimeBusy}
-                  >
-                    <option value="true">Enabled</option>
-                    <option value="false">Disabled</option>
-                  </select>
-                </label>
-                <label className="admin-field">
-                  <span>Requests per hour</span>
-                  <input
-                    type="number"
-                    min="1"
-                    max="1000"
-                    step="1"
-                    value={runtimeDraft.maxRequestsPerHour}
-                    onChange={(event) => setRuntimeDraft((current) => ({ ...current, maxRequestsPerHour: event.target.value }))}
-                    disabled={runtimeBusy}
-                  />
-                </label>
-                <label className="admin-field">
-                  <span>Provider timeout (ms)</span>
-                  <input
-                    type="number"
-                    min="1000"
-                    max="120000"
-                    step="1000"
-                    value={runtimeDraft.timeoutMs}
-                    onChange={(event) => setRuntimeDraft((current) => ({ ...current, timeoutMs: event.target.value }))}
-                    disabled={runtimeBusy}
-                  />
-                </label>
-              </div>
-              <button className="admin-btn admin-btn-primary" type="button" disabled={runtimeBusy} onClick={saveRuntime}>
-                {runtimeBusy ? "Saving…" : "Save runtime controls"}
-              </button>
-            </div>
-          </section>
-
-          <section className="admin-card">
-            <header className="admin-card-head">
-              <div>
-                <h2>Provider chain</h2>
-                <p>Failover targets and circuit breaker state.</p>
-              </div>
-            </header>
-            <div className="admin-card-body admin-card-body-flush">
-              {loading && <div className="admin-card-pad"><Skeleton rows={4} /></div>}
-              {!loading && chainData && chainData.length === 0 && (
-                <div className="admin-card-pad">
-                  <EmptyState title="No AI provider targets" message="No provider targets are configured." />
-                </div>
-              )}
-              {!loading && chainData && chainData.length > 0 && (
-                <div className="admin-table-wrap">
-                  <table className="admin-table">
-                    <thead>
-                      <tr>
-                        <th>Target</th>
-                        <th>Provider</th>
-                        <th>Model</th>
-                        <th>Circuit</th>
-                        <th>Failures</th>
-                        <th className="admin-col-actions">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {chainData.map((target) => (
-                        <tr key={target.id}>
-                          <td><strong>{target.label || target.id}</strong></td>
-                          <td className="admin-muted">{target.provider}</td>
-                          <td className="admin-muted admin-code">{target.model}</td>
-                          <td>
-                            <span className={`admin-badge ${target.circuit === "CLOSED" ? "admin-badge-active" : "admin-badge-danger"}`}>
-                              {target.circuit}
-                            </span>
-                          </td>
-                          <td>{target.failures ?? 0}</td>
-                          <td className="admin-col-actions">
-                            {target.circuit !== "CLOSED" && (
-                              <button
-                                className="admin-btn admin-btn-ghost admin-btn-sm"
-                                type="button"
-                                onClick={() => {
-                                  apiRequest(`admin/ai/providers/${encodeURIComponent(target.id)}/reset`, { method: "POST", body: "{}" })
-                                    .then(() => {
-                                      setMessage(`Circuit breaker for ${target.label} reset.`);
-                                      reload();
-                                    })
-                                    .catch((e) => setError(e.message));
-                                }}
-                              >
-                                Reset
-                              </button>
-                            )}
-                            {target.circuit === "CLOSED" && (
-                              <span className="admin-muted admin-badge-small">Healthy</span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </section>
-
-          <section className="admin-card">
-            <header className="admin-card-head">
-              <div>
-                <h2>AI usage (last {range} days)</h2>
-                <p>Real telemetry from ai_usage_events.</p>
-              </div>
-              <div className="admin-toolbar-right">
-                <button
-                  className="admin-btn admin-btn-ghost"
-                  type="button"
-                  onClick={() => setRange(range === 30 ? 7 : 30)}
-                >
-                  Show {range === 30 ? "7" : "30"} days
-                </button>
-              </div>
-            </header>
-            <div className="admin-card-body admin-card-body-flush">
-              {loading && <div className="admin-card-pad"><Skeleton rows={4} /></div>}
-              {!loading && usageData && (
-                <div className="admin-metric-grid">
-                  <div className="admin-metric">
-                    <div className="admin-metric-body">
-                      <span className="admin-metric-label">Total requests</span>
-                      <span className="admin-metric-value">{usageData?.totals?.requests ?? "—"}</span>
-                    </div>
-                  </div>
-                  <div className="admin-metric">
-                    <div className="admin-metric-body">
-                      <span className="admin-metric-label">Successful</span>
-                      <span className="admin-metric-value">{usageData?.totals?.successful ?? "—"}</span>
-                    </div>
-                  </div>
-                  <div className="admin-metric">
-                    <div className="admin-metric-body">
-                      <span className="admin-metric-label">Failed</span>
-                      <span className="admin-metric-value">{usageData?.totals?.failed ?? "—"}</span>
-                    </div>
-                  </div>
-                  <div className="admin-metric">
-                    <div className="admin-metric-body">
-                      <span className="admin-metric-label">Success rate</span>
-                      <span className="admin-metric-value">{usageData?.totals?.successRate ?? "—"}%</span>
-                    </div>
-                  </div>
-                  <div className="admin-metric">
-                    <div className="admin-metric-body">
-                      <span className="admin-metric-label">Avg latency</span>
-                      <span className="admin-metric-value">{usageData?.totals?.avgLatencyMs ?? "—"}ms</span>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </section>
-
-          <section className="admin-card">
-            <header className="admin-card-head">
-              <div>
-                <h2>Test provider</h2>
-                <p>Make a live health-check request through the configured failover chain.</p>
-              </div>
-            </header>
-            <div className="admin-card-body admin-card-body-flush">
-              <button
-                className="admin-btn admin-btn-primary"
-                type="button"
-                disabled={testBusy}
-                onClick={testProvider}
-              >
-                {testBusy ? "Testing…" : "Test provider"}
-              </button>
-              {testResult && (
-                <div className="admin-card-pad admin-mt">
-                  <div className={`admin-banner ${testResult.ok ? "admin-banner-success" : "admin-banner-error"}`} role="status">
-                    <strong>Provider:</strong> {testResult.provider}&nbsp;
-                    <strong>Model:</strong> {testResult.model}&nbsp;
-                    <strong>Latency:</strong> {testResult.latencyMs}ms&nbsp;
-                    <strong>Status:</strong> {testResult.ok ? "OK" : testResult.code}
-                    {testResult.sample && (<><br /><small>{testResult.sample}</small></>)}
-                    {testResult.message && (<><br /><small>{testResult.message}</small></>)}
-                  </div>
-                </div>
-              )}
-            </div>
-          </section>
-        </>
-      )}
-    </>
-  );
+  return <section className="section-page ai-settings-page">
+    <header className="section-page-heading ai-settings-heading"><div className="ai-settings-heading-row"><div><span className="admin-profile-overline">AI OPERATIONS</span><h1>AI management</h1><p>Configure providers, control failover, and keep AI features observable.</p></div><button className="admin-btn admin-btn-ghost" type="button" onClick={() => void load()} disabled={loading}><RefreshIcon size={15} /> {loading ? "Refreshing…" : "Refresh"}</button></div></header>
+    {error && <div className="admin-banner admin-banner-error" role="alert">{error}</div>}
+    {message && <div className="admin-banner admin-banner-success" role="status">{message}<button type="button" className="ai-dismiss" onClick={() => setMessage("")}><CloseIcon size={14} /></button></div>}
+    {loading && !config && <div className="panel admin-card-pad"><Skeleton rows={7} /></div>}
+    {config && <div className="settings-layout ai-settings-layout"><nav className="settings-nav" aria-label="AI management sections">{TABS.map(([key, label, Icon]) => <button key={key} type="button" className={`settings-nav-item ${activeTab === key ? "active" : ""}`} onClick={() => setActiveTab(key)}><Icon size={17} /><span>{label}</span></button>)}<div className="ai-settings-nav-summary"><span className={`admin-badge ${config.configured ? "admin-badge-active" : "admin-badge-muted"}`}>{config.configured ? "Chain ready" : "Needs setup"}</span><p>{providers.length} managed provider{providers.length === 1 ? "" : "s"}</p></div></nav><div className="settings-content">
+      {activeTab === "providers" && <ProvidersPanel providers={filteredProviders} query={providerQuery} filter={providerFilter} setQuery={setProviderQuery} setFilter={setProviderFilter} onAdd={openCreate} onEdit={openEdit} onRemove={removeProvider} onTest={testProvider} onTestChain={() => testProvider(null)} busy={providerBusy} testBusy={testBusy} testResult={testResult} />}
+      {activeTab === "failover" && <FailoverPanel chain={chain} onReset={resetCircuit} testBusy={testBusy} onTest={() => testProvider(null)} runtimeDraft={runtimeDraft} onChange={setRuntimeDraft} onSave={saveRuntime} busy={runtimeBusy} />}
+      {activeTab === "runtime" && <RuntimePanel runtimeDraft={runtimeDraft} onChange={setRuntimeDraft} onSave={saveRuntime} busy={runtimeBusy} webDraft={webDraft} setWebDraft={setWebDraft} onSaveWeb={saveWeb} webBusy={webBusy} webStatus={config.webSearch} />}
+      {activeTab === "usage" && <UsagePanel usage={usage} range={range} setRange={setRange} />}
+    </div></div>}
+    <AdminModal open={providerModal} title={editingProviderId ? "Edit AI provider" : "Add AI provider"} onClose={() => !providerBusy && setProviderModal(false)} footer={<><button className="admin-btn admin-btn-ghost" type="button" onClick={() => setProviderModal(false)} disabled={providerBusy}>Cancel</button><button className="admin-btn admin-btn-primary" type="submit" form="ai-provider-form" disabled={providerBusy}>{providerBusy ? "Saving…" : editingProviderId ? "Save changes" : "Add provider"}</button></>}>
+      <form id="ai-provider-form" className="admin-field-grid ai-provider-form" onSubmit={saveProvider}>
+        <label className="admin-field"><span>Display name</span><input required maxLength={120} value={providerDraft.displayName} onChange={(event) => updateDraft("displayName", event.target.value)} placeholder="Primary OpenAI" /></label>
+        <label className="admin-field"><span>Provider type</span><select value={providerDraft.providerType} onChange={changeProviderType}><option value="OPENAI">OpenAI</option><option value="GEMINI">Google Gemini</option><option value="OPENROUTER">OpenRouter</option><option value="CUSTOM_OPENAI">Custom OpenAI-compatible</option><option value="ANTHROPIC">Anthropic (existing)</option></select></label>
+        <label className="admin-field ai-provider-form-wide"><span>API credential {editingProviderId && providerDraft.hasCredential ? <small>(stored securely; leave blank to keep it)</small> : ""}</span><input type="password" autoComplete="new-password" required={!editingProviderId} value={providerDraft.apiCredential} onChange={(event) => updateDraft("apiCredential", event.target.value)} placeholder={editingProviderId ? "Enter a replacement credential" : "Stored encrypted on the backend"} /></label>
+        {editingProviderId && providerDraft.hasCredential && <label className="admin-field ai-provider-form-wide ai-checkbox-field"><input type="checkbox" checked={Boolean(providerDraft.removeCredential)} onChange={(event) => updateDraft("removeCredential", event.target.checked)} /> Remove the stored credential</label>}
+        <label className="admin-field ai-provider-form-wide"><span>API base URL</span><input required type="url" maxLength={500} value={providerDraft.baseUrl} onChange={(event) => updateDraft("baseUrl", event.target.value)} /></label>
+        <label className="admin-field"><span>Model identifier</span><input required maxLength={200} value={providerDraft.modelId} onChange={(event) => updateDraft("modelId", event.target.value)} placeholder="Select a discovered model or enter one" /></label>
+        <label className="admin-field"><span>Model display name</span><input maxLength={200} value={providerDraft.modelDisplayName} onChange={(event) => updateDraft("modelDisplayName", event.target.value)} placeholder="Optional label" /></label>
+        <label className="admin-field"><span>Execution priority</span><input required type="number" min="1" max="10000" value={providerDraft.priority} onChange={(event) => updateDraft("priority", event.target.value)} /></label>
+        <label className="admin-field"><span>Request timeout (ms)</span><input required type="number" min="1000" max="120000" step="1000" value={providerDraft.timeoutMs} onChange={(event) => updateDraft("timeoutMs", event.target.value)} /></label>
+        <label className="admin-field"><span>Status</span><select value={providerDraft.enabled ? "true" : "false"} onChange={(event) => updateDraft("enabled", event.target.value === "true")}><option value="true">Enabled</option><option value="false">Disabled</option></select></label>
+        <label className="admin-field"><span>Fallback participation</span><select value={providerDraft.fallbackEnabled ? "true" : "false"} onChange={(event) => updateDraft("fallbackEnabled", event.target.value === "true")}><option value="true">Eligible fallback</option><option value="false">Primary only</option></select></label>
+        <div className="ai-discovery-box ai-provider-form-wide"><div className="ai-discovery-head"><div><strong>Model discovery</strong><p>Never assume a manually entered identifier exists.</p></div><button className="admin-btn admin-btn-ghost admin-btn-sm" type="button" onClick={() => void discoverModels()} disabled={modelsBusy || !editingProviderId}><RefreshIcon size={14} /> {modelsBusy ? "Fetching…" : "Fetch available models"}</button></div>{!editingProviderId && <p className="admin-muted">Save this provider first to query its model-list endpoint.</p>}{models.length > 0 && <><input className="ai-model-search" value={modelQuery} onChange={(event) => setModelQuery(event.target.value)} placeholder="Search discovered models" aria-label="Search discovered models" /><div className="admin-select-list">{visibleModels.map((model) => <button className={`admin-select-option ${providerDraft.modelId === model.id ? "selected" : ""}`} type="button" key={model.id} onClick={() => { updateDraft("modelId", model.id); updateDraft("modelDisplayName", model.displayName || ""); }}><strong>{model.displayName || model.id}</strong><small>{model.id}</small></button>)}</div></>}</div>
+      </form>
+    </AdminModal>
+  </section>;
 }
+
+function SectionHeading({ icon: Icon, title, description, action }) { return <header className="ai-section-heading"><div className="ai-section-heading-copy"><span className="ai-section-icon"><Icon size={17} /></span><div><h2>{title}</h2><p>{description}</p></div></div>{action}</header>; }
+
+function ProvidersPanel({ providers, query, filter, setQuery, setFilter, onAdd, onEdit, onRemove, onTest, onTestChain, busy, testBusy, testResult }) { return <><SectionHeading icon={SparklesIcon} title="AI providers" description="Manage encrypted credentials and the order used by live AI requests." action={<button className="admin-btn admin-btn-primary" type="button" onClick={onAdd}><PlusIcon size={15} /> Add AI provider</button>} /><div className="ai-provider-toolbar"><label className="ai-search-field"><span>Search</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Name, provider, or model" /></label><label className="ai-search-field"><span>Show</span><select value={filter} onChange={(event) => setFilter(event.target.value)}><option value="ALL">All providers</option><option value="ENABLED">Enabled only</option><option value="OPERATIONAL">Operational</option><option value="UNTESTED">Needs testing</option><option value="INVALID">Needs attention</option></select></label><button className="admin-btn admin-btn-ghost" type="button" onClick={onTestChain} disabled={Boolean(testBusy)}><ShieldIcon size={15} /> {testBusy === "chain" ? "Testing…" : "Test provider chain"}</button></div>{testResult && <div className={`admin-banner ${testResult.ok ? "admin-banner-success" : "admin-banner-error"}`}><strong>{testResult.ok ? "Chain test passed" : "Chain test failed"}</strong>{testResult.provider ? ` · ${testResult.provider} / ${testResult.model}` : ""}{testResult.latencyMs ? ` · ${testResult.latencyMs} ms` : ""}{testResult.failoverCount ? ` · ${testResult.failoverCount} failover` : ""}</div>}{providers.length === 0 ? <EmptyState icon={SparklesIcon} title="No managed providers" message="Add a provider to create a database-managed AI chain. Environment providers continue to work as a compatibility fallback." /> : <div className="ai-provider-list">{providers.map((provider) => <ProviderCard key={provider.id} provider={provider} onEdit={onEdit} onRemove={onRemove} onTest={onTest} busy={busy} testBusy={testBusy} />)}</div>}</>; }
+
+function ProviderCard({ provider, onEdit, onRemove, onTest, busy, testBusy }) { const health = provider.health || {}; return <article className="ai-provider-card"><div className="ai-provider-card-top"><div className="ai-provider-identity"><ProviderIcon type={provider.providerType} /><div><h3>{provider.displayName}</h3><p>{providerLabel(provider.providerType)} · <code>{provider.modelId}</code></p></div></div><span className={`admin-badge ${statusClass(provider.operationalStatus)}`}>{provider.operationalStatus === "UNTESTED" ? "Not tested" : provider.operationalStatus.toLowerCase()}</span></div><div className="ai-provider-meta"><span><b>Priority</b>{provider.priority}</span><span><b>Credential</b>{provider.credentialMasked || "Not set"}</span><span><b>Latency</b>{health.averageLatencyMs == null ? "—" : `${health.averageLatencyMs} ms`}</span><span><b>Success</b>{health.successRate == null ? "—" : `${health.successRate}%`}</span><span><b>Circuit</b><em className={statusClass(health.circuit)}>{health.circuit}</em></span></div><div className="ai-provider-card-foot"><span className="ai-provider-footnote">{provider.enabled ? (provider.fallbackEnabled ? "Eligible for primary and fallback traffic" : "Enabled as a primary-only target") : "Disabled from live traffic"}</span><div className="ai-action-row"><button className="admin-icon-action" type="button" title="Test provider" aria-label={`Test ${provider.displayName}`} onClick={() => onTest(provider)} disabled={Boolean(testBusy)}><CheckIcon size={15} /></button><button className="admin-icon-action" type="button" title="Edit provider" aria-label={`Edit ${provider.displayName}`} onClick={() => onEdit(provider)}><EditIcon size={15} /></button><button className="admin-icon-action admin-icon-action-danger" type="button" title="Remove provider" aria-label={`Remove ${provider.displayName}`} onClick={() => onRemove(provider)} disabled={busy === provider.id}><TrashIcon size={15} /></button></div></div></article>; }
+
+function FailoverPanel({ chain, onReset, testBusy, onTest, runtimeDraft, onChange, onSave, busy }) { return <><SectionHeading icon={ShieldIcon} title="Failover control" description="Set how the router handles transient failures and recovery." /><div className="panel feature-form ai-settings-form"><div className="feature-form-grid"><label>Maximum provider attempts<input type="number" min="1" max="20" value={runtimeDraft.maxFailoverAttempts} onChange={(event) => onChange((current) => ({ ...current, maxFailoverAttempts: event.target.value }))} /></label><label>Failure threshold<input type="number" min="1" max="20" value={runtimeDraft.failureThreshold} onChange={(event) => onChange((current) => ({ ...current, failureThreshold: event.target.value }))} /></label><label>Recovery cooldown (ms)<input type="number" min="1000" max="3600000" step="1000" value={runtimeDraft.recoveryCooldownMs} onChange={(event) => onChange((current) => ({ ...current, recoveryCooldownMs: event.target.value }))} /></label><label>Provider timeout (ms)<input type="number" min="1000" max="120000" step="1000" value={runtimeDraft.timeoutMs} onChange={(event) => onChange((current) => ({ ...current, timeoutMs: event.target.value }))} /></label></div><label className="ai-toggle-row"><input type="checkbox" checked={Boolean(runtimeDraft.fallbackEnabled)} onChange={(event) => onChange((current) => ({ ...current, fallbackEnabled: event.target.checked }))} /><span><strong>Allow fallback providers</strong><small>Network errors, timeouts, rate limits, and temporary 5xx errors may move to the next eligible target.</small></span></label><button className="button button-primary" type="button" onClick={onSave} disabled={busy}>{busy ? "Saving…" : "Save failover controls"}</button></div><div className="ai-chain-card panel"><div className="ai-chain-head"><div><h3>Live provider chain</h3><p>Targets are ordered by configured priority. Authentication and invalid-request failures stop immediately.</p></div><button className="admin-btn admin-btn-ghost" type="button" onClick={onTest} disabled={Boolean(testBusy)}><CheckIcon size={15} /> {testBusy === "chain" ? "Testing…" : "Run chain test"}</button></div>{chain.length === 0 ? <EmptyState title="No active targets" message="Enable a provider with a stored credential to build the chain." /> : <div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>Priority</th><th>Provider</th><th>Model</th><th>Circuit</th><th>Failures</th><th /></tr></thead><tbody>{chain.map((target) => <tr key={target.id}><td>{target.priority ?? "Env"}</td><td><strong>{target.label || target.provider}</strong><small className="admin-muted">{target.provider}</small></td><td><code>{target.model}</code></td><td><span className={`admin-badge ${statusClass(target.circuit)}`}>{target.circuit}</span></td><td>{target.failures ?? 0}</td><td className="admin-col-actions">{target.circuit !== "CLOSED" && <button className="admin-btn admin-btn-ghost admin-btn-sm" type="button" onClick={() => onReset(target.id)}>Reset</button>}</td></tr>)}</tbody></table></div>}</div></>; }
+
+function RuntimePanel({ runtimeDraft, onChange, onSave, busy, webDraft, setWebDraft, onSaveWeb, webBusy, webStatus }) { return <><SectionHeading icon={SettingsIcon} title="Runtime controls" description="Keep feature switches independent from provider readiness." /><div className="panel feature-form ai-settings-form"><div className="feature-form-grid"><label>AI assistant<select value={runtimeDraft.assistantEnabled ? "true" : "false"} onChange={(event) => onChange((current) => ({ ...current, assistantEnabled: event.target.value === "true" }))}><option value="true">Enabled</option><option value="false">Disabled</option></select></label><label>AI matching<select value={runtimeDraft.matchingEnabled ? "true" : "false"} onChange={(event) => onChange((current) => ({ ...current, matchingEnabled: event.target.value === "true" }))}><option value="true">Enabled</option><option value="false">Disabled</option></select></label><label>Requests per hour<input type="number" min="1" max="1000" value={runtimeDraft.maxRequestsPerHour} onChange={(event) => onChange((current) => ({ ...current, maxRequestsPerHour: event.target.value }))} /></label></div><button className="button button-primary" type="button" onClick={onSave} disabled={busy}>{busy ? "Saving…" : "Save runtime controls"}</button></div><SectionHeading icon={SparklesIcon} title="Public web research" description="Control research independently; web credentials stay environment-managed." /><div className="panel feature-form ai-settings-form"><div className="feature-form-grid"><label>Research availability<select value={webDraft.enabled ? "true" : "false"} onChange={(event) => setWebDraft((current) => ({ ...current, enabled: event.target.value === "true" }))}><option value="false">Disabled</option><option value="true">Enabled</option></select></label><label>Default source mode<select value={webDraft.defaultMode} onChange={(event) => setWebDraft((current) => ({ ...current, defaultMode: event.target.value }))}><option value="LOCAL">My study material</option><option value="AUTO">Automatic</option><option value="BOTH">Both</option><option value="WEB">Internet research</option></select></label><label>Maximum sources<input type="number" min="1" max="20" value={webDraft.maxResults} onChange={(event) => setWebDraft((current) => ({ ...current, maxResults: event.target.value }))} /></label><label>Searches per student/hour<input type="number" min="1" max="10000" value={webDraft.maxRequestsPerHour} onChange={(event) => setWebDraft((current) => ({ ...current, maxRequestsPerHour: event.target.value }))} /></label><label>Cache lifetime (minutes)<input type="number" min="0" max="1440" value={webDraft.cacheTtlMin} onChange={(event) => setWebDraft((current) => ({ ...current, cacheTtlMin: event.target.value }))} /></label><label>Safe search<select value={webDraft.safeSearch} onChange={(event) => setWebDraft((current) => ({ ...current, safeSearch: event.target.value }))}><option value="strict">Strict</option><option value="moderate">Moderate</option><option value="off">Off</option></select></label><label className="form-span">Trusted domains<input value={(webDraft.allowlistDomains || []).join(", ")} onChange={(event) => setWebDraft((current) => ({ ...current, allowlistDomains: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) }))} placeholder="Optional, comma separated" /></label><label className="form-span">Blocked domains<input value={(webDraft.blocklistDomains || []).join(", ")} onChange={(event) => setWebDraft((current) => ({ ...current, blocklistDomains: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) }))} placeholder="Optional, comma separated" /></label></div><p className="feature-muted">Configured provider: {webStatus?.provider || "None"}. Status: {webStatus?.configured ? "ready" : "not configured"}.</p><button className="button button-primary" type="button" onClick={onSaveWeb} disabled={webBusy}>{webBusy ? "Saving…" : "Save web research policy"}</button></div></>; }
+
+function UsagePanel({ usage, range, setRange }) { const totals = usage?.totals || {}; return <><SectionHeading icon={ChartIcon} title="Usage and health" description="Telemetry from live AI requests. Token totals remain blank when providers do not report usage." action={<button className="admin-btn admin-btn-ghost" type="button" onClick={() => setRange(range === 30 ? 7 : 30)}>Last {range === 30 ? 7 : 30} days</button>} /><div className="admin-metric-grid ai-usage-metrics"><Metric label="Requests" value={totals.requests ?? "—"} /><Metric label="Success rate" value={totals.successRate == null ? "—" : `${totals.successRate}%`} /><Metric label="Avg latency" value={totals.avgLatencyMs == null ? "—" : `${totals.avgLatencyMs} ms`} /><Metric label="Failovers" value={totals.failovers ?? "—"} /></div><div className="ai-usage-grid"><div className="panel ai-usage-card"><h3>By provider</h3>{usage?.byProvider?.length ? <div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>Provider</th><th>Requests</th><th>Success</th><th>Latency</th></tr></thead><tbody>{usage.byProvider.map((row) => <tr key={row.provider}><td><strong>{row.provider}</strong></td><td>{row.requests}</td><td>{row.successful}</td><td>{row.avg_latency_ms == null ? "—" : `${row.avg_latency_ms} ms`}</td></tr>)}</tbody></table></div> : <EmptyState title="No provider usage yet" message="Usage will appear after an AI feature or provider test runs." />}</div><div className="panel ai-usage-card"><h3>By model</h3>{usage?.byModel?.length ? <div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>Model</th><th>Requests</th><th>Tokens</th></tr></thead><tbody>{usage.byModel.map((row) => <tr key={`${row.provider}-${row.model}`}><td><strong>{row.model}</strong><small className="admin-muted">{row.provider}</small></td><td>{row.requests}</td><td>{row.total_tokens == null ? "—" : row.total_tokens}</td></tr>)}</tbody></table></div> : <EmptyState title="No model usage yet" message="Reported token data will be shown only when available." />}</div></div></>; }
+function Metric({ label, value }) { return <div className="admin-metric"><div className="admin-metric-body"><span className="admin-metric-label">{label}</span><span className="admin-metric-value">{value}</span></div></div>; }

@@ -355,6 +355,7 @@ export const respondInvitationSchema = z.object({
 export const joinRequestSchema = z.object({
   groupId: uuid,
   message: shortText.max(500).optional().nullable(),
+  recommendationId: uuid.optional().nullable(),
 });
 
 export const decideJoinRequestSchema = z.object({
@@ -808,6 +809,7 @@ export const partnerInviteSchema = z.object({
   recipientId: uuid,
   /** An optional note accompanying the request. */
   message: z.string().trim().min(1).max(500).optional(),
+  recommendationId: uuid.optional().nullable(),
 });
 
 export const partnerRespondSchema = z.object({
@@ -921,6 +923,14 @@ export const aiChatSchema = z.object({
   /** Restrict answers to these resources when the user wants a grounded answer. */
   resourceIds: z.array(uuid).max(10).default([]),
   useGroupContext: z.boolean().default(true),
+  sourceMode: z.enum(["LOCAL", "WEB", "BOTH", "AUTO"]).optional(),
+  researchOptions: z.object({
+    country: z.string().trim().regex(/^[A-Za-z]{2}$/, "Use a two-letter country code.").optional(),
+    language: z.string().trim().min(2).max(12).optional(),
+    freshness: z.string().trim().max(40).regex(/^(pd|pw|pm|py|\d{4}-\d{2}-\d{2}to\d{4}-\d{2}-\d{2})?$/i, "That freshness filter is not valid.").optional(),
+    includeDomains: z.array(z.string().trim().min(1).max(120)).max(20).optional(),
+    excludeDomains: z.array(z.string().trim().min(1).max(120)).max(20).optional(),
+  }).optional().default({}),
 });
 
 export const aiIntentSchema = z.object({
@@ -1211,6 +1221,8 @@ export const adminUpdateUserSchema = z
     message: "Provide at least one field to update.",
   });
 
+export const adminDeleteUserSchema = z.object({ reason });
+
 export const adminChangeUserRoleSchema = z.object({
   role: z.enum(["STUDENT", "GROUP_LEADER", "ADMIN"]),
   reason,
@@ -1236,6 +1248,8 @@ export const adminGroupSuspendSchema = z.object({ reason });
 export const adminGroupRestoreSchema = z.object({ reason: optionalReason });
 export const adminGroupArchiveSchema = z.object({ reason: optionalReason });
 export const adminGroupMemberParamSchema = z.object({ groupId: uuid, userId: uuid });
+export const adminGroupJoinRequestParamSchema = z.object({ groupId: uuid, requestId: uuid });
+export const adminGroupJoinRequestDecisionSchema = decideJoinRequestSchema.pick({ decision: true, note: true });
 
 export const adminSessionCancelSchema = z.object({ reason });
 
@@ -1322,6 +1336,25 @@ export const settingSectionSchemas = Object.freeze({
     matchingEnabled: z.boolean(),
     maxRequestsPerHour: z.coerce.number().int().min(1).max(1000),
     timeoutMs: z.coerce.number().int().min(1000).max(120_000),
+    maxFailoverAttempts: z.coerce.number().int().min(1).max(20),
+    fallbackEnabled: z.boolean(),
+    failureThreshold: z.coerce.number().int().min(1).max(20),
+    recoveryCooldownMs: z.coerce.number().int().min(1000).max(3_600_000),
+  }),
+  "ai.web": z.object({
+    enabled: z.boolean(),
+    defaultMode: z.enum(["LOCAL", "WEB", "BOTH", "AUTO"]),
+    maxQueries: z.coerce.number().int().min(1).max(5),
+    maxResults: z.coerce.number().int().min(1).max(20),
+    timeoutMs: z.coerce.number().int().min(1000).max(30_000),
+    maxContextChars: z.coerce.number().int().min(1000).max(100_000),
+    cacheTtlMin: z.coerce.number().int().min(0).max(1440),
+    maxRequestsPerHour: z.coerce.number().int().min(1).max(10_000),
+    country: z.string().trim().regex(/^[A-Za-z]{2}$/),
+    language: z.string().trim().min(2).max(12),
+    safeSearch: z.enum(["off", "moderate", "strict"]),
+    allowlistDomains: z.array(z.string().trim().min(1).max(120)).max(100),
+    blocklistDomains: z.array(z.string().trim().min(1).max(120)).max(100),
   }),
   "academic.settings": z.object({
     semesters: z.array(z.string().trim().min(1).max(60)).min(1).max(20),
@@ -1334,6 +1367,26 @@ export const settingSectionKeySchema = z.object({
 });
 
 export const aiRuntimeUpdateSchema = settingSectionSchemas["ai.runtime"].partial();
+export const aiWebUpdateSchema = settingSectionSchemas["ai.web"].partial();
+
+export const aiProviderTypeSchema = z.enum(["OPENAI", "GEMINI", "OPENROUTER", "CUSTOM_OPENAI", "ANTHROPIC"]);
+export const aiProviderCreateSchema = z.object({
+  displayName: z.string().trim().min(2).max(120),
+  providerType: aiProviderTypeSchema,
+  apiCredential: z.string().trim().min(1).max(10000),
+  baseUrl: z.string().trim().url().max(500),
+  modelId: z.string().trim().min(1).max(200),
+  modelDisplayName: z.string().trim().max(200).optional().nullable(),
+  priority: z.coerce.number().int().min(1).max(10000).default(100),
+  timeoutMs: z.coerce.number().int().min(1000).max(120000).default(25000),
+  enabled: z.boolean().default(true),
+  fallbackEnabled: z.boolean().default(true),
+});
+export const aiProviderUpdateSchema = aiProviderCreateSchema.omit({ apiCredential: true }).partial().extend({
+  apiCredential: z.string().trim().min(1).max(10000).optional(),
+  removeCredential: z.boolean().optional(),
+});
+export const aiProviderIdSchema = z.object({ id: z.string().uuid() });
 
 export const aiUsageQuerySchema = z.object({
   range: z.coerce

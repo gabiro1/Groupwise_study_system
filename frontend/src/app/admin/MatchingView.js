@@ -25,13 +25,25 @@ function Stat({ label, value, hint }) {
 export default function MatchingView() {
   const [range, setRange] = useState(30);
   const [data, setData] = useState(null);
+  const [modelStatus, setModelStatus] = useState(null);
+  const [trainingRuns, setTrainingRuns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [actionMessage, setActionMessage] = useState("");
+  const [modelVersion, setModelVersion] = useState("");
+  const [actionBusy, setActionBusy] = useState(false);
 
   const load = useCallback(async (nextRange) => {
     try {
-      const result = await apiRequest(`admin/overview?range=${nextRange}`);
-      setData(result);
+      const [overview, status, history] = await Promise.all([
+        apiRequest(`admin/overview?range=${nextRange}`),
+        apiRequest("admin/recommendations/status"),
+        apiRequest("admin/recommendations/training-runs?limit=10"),
+      ]);
+      setData(overview);
+      setModelStatus(status);
+      setTrainingRuns(history.runs || []);
       setError("");
     } catch (requestError) {
       setError(requestError.message);
@@ -44,9 +56,15 @@ export default function MatchingView() {
     let active = true;
     (async () => {
       try {
-        const result = await apiRequest(`admin/overview?range=${range}`);
+        const [result, status, history] = await Promise.all([
+          apiRequest(`admin/overview?range=${range}`),
+          apiRequest("admin/recommendations/status"),
+          apiRequest("admin/recommendations/training-runs?limit=10"),
+        ]);
         if (active) {
           setData(result);
+          setModelStatus(status);
+          setTrainingRuns(history.runs || []);
           setError("");
         }
       } catch (requestError) {
@@ -65,8 +83,43 @@ export default function MatchingView() {
     setRange(nextRange);
   }
 
+  async function runModelAction(action, body = {}) {
+    setActionBusy(true);
+    setActionError("");
+    setActionMessage("");
+    try {
+      await apiRequest(action, { method: "POST", body: JSON.stringify(body) });
+      setActionMessage("Recommendation model settings updated.");
+      await load(range);
+    } catch (requestError) {
+      setActionError(requestError.message);
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function togglePersonalization(event) {
+    setActionBusy(true);
+    setActionError("");
+    setActionMessage("");
+    try {
+      await apiRequest("admin/recommendations/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ personalizationEnabled: event.target.checked }),
+      });
+      setActionMessage("Personalization setting updated.");
+      await load(range);
+    } catch (requestError) {
+      setActionError(requestError.message);
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   const matching = data?.matching;
   const trend = matching?.acceptanceTrend;
+  const readiness = modelStatus?.readiness;
+  const activeVersion = modelStatus?.activeModelVersion || "weighted-v1.0.0";
 
   return (
     <>
@@ -157,6 +210,58 @@ export default function MatchingView() {
               </div>
             </section>
           </div>
+
+          <section className="admin-card" aria-labelledby="model-status-heading">
+            <header className="admin-card-head">
+              <div>
+                <h2 id="model-status-heading">Recommendation model operations</h2>
+                <p>Training is separate from activation. Weighted scoring remains the safe fallback.</p>
+              </div>
+            </header>
+            <div className="admin-card-body">
+              <div className="admin-count-grid">
+                <Stat label="Active algorithm" value={modelStatus?.algorithm} />
+                <Stat label="Active version" value={activeVersion} />
+                <Stat label="Training readiness" value={readiness?.ready ? "Ready" : "Not enough real data"} hint={readiness?.counts ? `${readiness.counts.labelledRows || 0} labelled rows` : undefined} />
+                <Stat label="Model service" value={modelStatus?.modelService?.status || "—"} hint={`${modelStatus?.fallbackCount30d || 0} fallbacks in 30 days`} />
+              </div>
+              {readiness?.reason && <p className="admin-muted">{readiness.reason}</p>}
+              {actionError && <p className="feature-error" role="alert">{actionError}</p>}
+              {actionMessage && <p className="feature-success" role="status">{actionMessage}</p>}
+              <div className="admin-form-row" style={{ alignItems: "end", flexWrap: "wrap", gap: "0.75rem" }}>
+                <label>
+                  <span className="admin-count-label">Model version</span>
+                  <input value={modelVersion} onChange={(event) => setModelVersion(event.target.value)} placeholder="ltr-v1.0.0" />
+                </label>
+                <button className="admin-btn admin-btn-secondary" type="button" disabled={actionBusy || !modelVersion} onClick={() => runModelAction("admin/recommendations/training-runs", { modelVersion, datasetKind: "REAL" })}>Request export</button>
+                <button className="admin-btn admin-btn-primary" type="button" disabled={actionBusy || !modelVersion} onClick={() => runModelAction(`admin/recommendations/models/${encodeURIComponent(modelVersion)}/activate`)}>Activate validated model</button>
+                <button className="admin-btn admin-btn-ghost" type="button" disabled={actionBusy || !modelVersion} onClick={() => runModelAction(`admin/recommendations/models/${encodeURIComponent(modelVersion)}/deactivate`)}>Restore weighted baseline</button>
+                <button className="admin-btn admin-btn-ghost" type="button" disabled={actionBusy} onClick={() => runModelAction("admin/recommendations/model-service/reset")}>Reset service circuit</button>
+                <label className="admin-toggle">
+                  <input type="checkbox" checked={Boolean(modelStatus?.runtime?.personalizationEnabled)} onChange={togglePersonalization} disabled={actionBusy} />
+                  <span>Enable bounded personalization</span>
+                </label>
+              </div>
+              <h3>Training history</h3>
+              {trainingRuns.length ? (
+                <div className="admin-table-wrap">
+                  <table className="admin-table">
+                    <thead><tr><th>Version</th><th>Status</th><th>Rows</th><th>Positive</th><th>Negative</th><th>Created</th></tr></thead>
+                    <tbody>{trainingRuns.map((run) => (
+                      <tr key={run.id}>
+                        <td>{run.version}</td>
+                        <td>{run.status}</td>
+                        <td>{run.row_count ?? 0}</td>
+                        <td>{run.positive_label_count ?? 0}</td>
+                        <td>{run.negative_label_count ?? 0}</td>
+                        <td>{run.created_at ? new Date(run.created_at).toLocaleString() : "—"}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              ) : <p className="admin-chart-empty">No training runs yet.</p>}
+            </div>
+          </section>
         </>
       )}
     </>

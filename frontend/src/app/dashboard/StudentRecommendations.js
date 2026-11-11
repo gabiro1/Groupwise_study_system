@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import AiMatchSearch from "./AiMatchSearch";
 
@@ -27,6 +27,15 @@ const KINDS = [
   { value: "STUDENT", label: "Study partners" },
 ];
 
+function algorithmLabel(value) {
+  return {
+    WEIGHTED_SCORING: "Weighted scoring",
+    PERSONALIZED_WEIGHTED_SCORING: "Personalized weighted scoring",
+    LEARNING_TO_RANK: "Learning-to-rank",
+    LEARNING_TO_RANK_WITH_PERSONALIZATION: "Learning-to-rank with personalization",
+  }[value] || "Weighted scoring";
+}
+
 export default function StudentRecommendations({ onJoin, compact = false }) {
   const [kind, setKind] = useState("GROUP");
   const [results, setResults] = useState([]);
@@ -34,7 +43,24 @@ export default function StudentRecommendations({ onJoin, compact = false }) {
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState("");
   const [requestedIds, setRequestedIds] = useState([]);
+  const [modelMeta, setModelMeta] = useState(null);
+  const shownIds = useRef(new Set());
   const visibleResults = compact ? results.slice(0, 3) : results;
+
+  useEffect(() => {
+    if (loading) return;
+    const cards = compact ? results.slice(0, 3) : results;
+    const pending = cards
+      .map((item) => item.recommendationId)
+      .filter((id) => id && !shownIds.current.has(id));
+    pending.forEach((id) => shownIds.current.add(id));
+    if (pending.length) {
+      Promise.allSettled(pending.map((id) => apiRequest(`recommendations/${id}/outcome`, {
+        method: "PATCH",
+        body: JSON.stringify({ action: "SHOWN" }),
+      })));
+    }
+  }, [compact, loading, results]);
 
   useEffect(() => {
     let active = true;
@@ -51,7 +77,8 @@ export default function StudentRecommendations({ onJoin, compact = false }) {
       })
       .then((data) => {
         if (!active) return;
-        setResults(data.results || []);
+         setResults(data.results || []);
+         setModelMeta(data);
         setError("");
       })
       .catch((requestError) => {
@@ -77,7 +104,10 @@ export default function StudentRecommendations({ onJoin, compact = false }) {
         source: "DASHBOARD",
       }),
     })
-      .then((data) => setResults(data.results || []))
+       .then((data) => {
+         setResults(data.results || []);
+         setModelMeta(data);
+       })
       .catch((requestError) => setError(requestError.message))
       .finally(() => setLoading(false));
   }
@@ -101,6 +131,7 @@ export default function StudentRecommendations({ onJoin, compact = false }) {
         id: recommendation.groupId,
         name: recommendation.name,
         workspaceId: recommendation.workspaceId,
+        recommendationId: recommendation.recommendationId,
       });
       if (result?.status === "JOINED" || result?.status === "REQUESTED") {
         setResults((current) => current.filter((item) => item.recommendationId !== recommendation.recommendationId));
@@ -119,7 +150,7 @@ export default function StudentRecommendations({ onJoin, compact = false }) {
       await recordOutcome(recommendation, "CLICKED");
       await apiRequest("partners/invitations", {
         method: "POST",
-        body: JSON.stringify({ recipientId: recommendation.studentId }),
+        body: JSON.stringify({ recipientId: recommendation.studentId, recommendationId: recommendation.recommendationId }),
       });
       setRequestedIds((current) => [...current, recommendation.studentId]);
     } catch (requestError) {
@@ -164,6 +195,7 @@ export default function StudentRecommendations({ onJoin, compact = false }) {
     if (next === kind) return;
     setKind(next);
     setResults([]);
+    shownIds.current.clear();
     setError("");
   }, [kind]);
 
@@ -192,7 +224,10 @@ export default function StudentRecommendations({ onJoin, compact = false }) {
         </div>
       )}
       <div className={`recommendation-toolbar${compact ? " dashboard-recommendation-toolbar" : ""}`}>
-        <p>{results.length ? `${results.length} suggestions based on your profile` : "Your profile helps us find a better fit."}</p>
+        <div>
+          <p>{results.length ? `${results.length} suggestions based on your profile` : "Your profile helps us find a better fit."}</p>
+          {modelMeta && <small className="admin-muted">Ranking source: {algorithmLabel(modelMeta.algorithm)}{modelMeta.degraded ? " · weighted fallback active" : ""}</small>}
+        </div>
         <button className="button button-secondary" type="button" onClick={loadRecommendations} disabled={loading}>
           {loading ? "Updating…" : "Refresh matches"}
         </button>
@@ -220,9 +255,10 @@ export default function StudentRecommendations({ onJoin, compact = false }) {
                     <h2>{[item.firstName, item.lastName].filter(Boolean).join(" ") || "A study partner"}</h2>
                   </div>
                   <span className="match-score" aria-label={`${Math.round(item.score)} percent match`}>
-                    <strong>{Math.round(item.score)}%</strong><small>{item.label}</small>
+                   <strong>{Math.round(item.score)}%</strong><small>{item.label}</small>
                   </span>
                 </div>
+                {item.baselineScore != null && item.algorithm !== "WEIGHTED_SCORING" && <small className="admin-muted">Baseline weighted score: {Math.round(item.baselineScore)}%</small>}
                 <div className="recommendation-reasons">
                   <strong>Why this partner?</strong>
                   {item.reasons?.length
@@ -250,9 +286,10 @@ export default function StudentRecommendations({ onJoin, compact = false }) {
                   <h2>{item.name}</h2>
                 </div>
                 <span className="match-score" aria-label={`${Math.round(item.score)} percent match`}>
-                  <strong>{Math.round(item.score)}%</strong><small>{item.label}</small>
+                   <strong>{Math.round(item.score)}%</strong><small>{item.label}</small>
                 </span>
               </div>
+              {item.baselineScore != null && item.algorithm !== "WEIGHTED_SCORING" && <small className="admin-muted">Baseline weighted score: {Math.round(item.baselineScore)}%</small>}
               {item.description && <p className="recommendation-description">{item.description}</p>}
               <p className="recommendation-meta">{item.memberCount} {item.memberCount === 1 ? "member" : "members"} · {item.mode?.toLowerCase() || "study mode not specified"}</p>
               <div className="recommendation-reasons">

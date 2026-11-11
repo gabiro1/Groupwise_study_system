@@ -1,5 +1,6 @@
 import env from "../../config/env.js";
 import { logger } from "../../config/logger.js";
+import { getRuntimeTargets as getDatabaseTargets } from "../../services/aiProvider.service.js";
 
 /**
  * AI provider registry.
@@ -91,8 +92,10 @@ function resolveAdapter(entry) {
  * human `label`. The list is computed once because env is frozen at boot.
  */
 let cachedTargets = null;
+let runtimeTargets = null;
 
 export function getTargets() {
+  if (runtimeTargets) return runtimeTargets;
   if (cachedTargets) return cachedTargets;
 
   const targets = [];
@@ -143,6 +146,33 @@ export function getTargets() {
 
   cachedTargets = targets.filter((target) => target.apiKey && target.baseUrl);
   return cachedTargets;
+}
+
+/**
+ * Resolve live database-managed providers without making synchronous callers
+ * depend on database I/O. The environment chain remains the safe fallback when
+ * the provider table is unavailable or empty.
+ */
+export async function getTargetsAsync() {
+  try {
+    const databaseTargets = await getDatabaseTargets();
+    const environmentTargets = getEnvironmentTargets();
+    runtimeTargets = [...databaseTargets, ...environmentTargets];
+    return runtimeTargets;
+  } catch (error) {
+    logger.warn("AI provider table unavailable; using environment chain", { message: error.message });
+    runtimeTargets = getEnvironmentTargets();
+    return runtimeTargets;
+  }
+}
+
+function getEnvironmentTargets() {
+  if (cachedTargets) return cachedTargets;
+  return getTargets();
+}
+
+export function clearRuntimeTargets() {
+  runtimeTargets = null;
 }
 
 /** Whether any target is fully configured (provider + API key). */

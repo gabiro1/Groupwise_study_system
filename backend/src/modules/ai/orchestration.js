@@ -1,8 +1,10 @@
 import crypto from "node:crypto";
 import { AppError, ServiceUnavailableError } from "../../lib/errors.js";
 import { logger } from "../../config/logger.js";
-import { getTargets } from "./registry.js";
+import { getTargetsAsync } from "./registry.js";
 import { getAdapterFor } from "./adapters.js";
+import { aiRuntime } from "../../services/settings.service.js";
+import { recordProviderFailure, recordProviderSuccess } from "../../services/aiProviderHealth.service.js";
 
 /**
  * Bounded failover + circuit breaker + idempotency-safe orchestration.
@@ -23,7 +25,11 @@ import { getAdapterFor } from "./adapters.js";
  */
 const CIRCUIT_STATE = new Map();
 
-function circuitBreaker(key, opts = { failThreshold: 3, resetTimeoutMs: 30_000, timeoutMs: 8000 }) {
+function circuitBreaker(key, opts = {}) {
+  const settings = {
+    failThreshold: opts.failThreshold ?? 3,
+    resetTimeoutMs: opts.resetTimeoutMs ?? 30_000,
+  };
   let state = "CLOSED";
   let failures = 0;
   let lastFailureAt = null;
@@ -32,8 +38,8 @@ function circuitBreaker(key, opts = { failThreshold: 3, resetTimeoutMs: 30_000, 
     key,
     allow() {
       if (state === "OPEN") {
-        if (lastFailureAt && Date.now() - lastFailureAt >= opts.resetTimeoutMs) {
-          state = "HALF_OPEN";
+        if (lastFailureAt && Date.now() - lastFailureAt >= settings.resetTimeoutMs) {
+          state = "HALF-OPEN";
           failures = 0;
         } else {
           return { allowed: false, state };
@@ -43,12 +49,12 @@ function circuitBreaker(key, opts = { failThreshold: 3, resetTimeoutMs: 30_000, 
     },
     recordSuccess() {
       failures = 0;
-      if (state === "HALF_OPEN") state = "CLOSED";
+      if (state === "HALF-OPEN") state = "CLOSED";
     },
     recordFailure() {
       failures += 1;
       lastFailureAt = Date.now();
-      if (failures >= opts.failThreshold) state = "OPEN";
+      if (failures >= settings.failThreshold) state = "OPEN";
     },
     reset() {
       state = "CLOSED";
@@ -61,10 +67,10 @@ function circuitBreaker(key, opts = { failThreshold: 3, resetTimeoutMs: 30_000, 
   };
 }
 
-function circuitFor(id) {
+function circuitFor(id, options = {}) {
   let breaker = CIRCUIT_STATE.get(id);
   if (!breaker) {
-    breaker = circuitBreaker(id);
+    breaker = circuitBreaker(id, options);
     CIRCUIT_STATE.set(id, breaker);
   }
   return breaker;
@@ -89,13 +95,22 @@ export function requestId(req) {
  * @returns {Promise<{text:string, model:string, provider:string, targetId:string}>}
  */
 export async function callProvider(messages, options = {}) {
-  const targets = options.targets?.length ? options.targets : getTargets();
+  const runtime = options.targets?.length ? {} : await aiRuntime().catch(() => ({}));
+  const configuredTargets = options.targets?.length ? options.targets : await getTargetsAsync();
+  const fallbackEnabled = options.fallbackEnabled ?? runtime.fallbackEnabled ?? true;
+  const maxAttempts = options.maxFailoverAttempts ?? runtime.maxFailoverAttempts ?? configuredTargets.length;
+  const targets = configuredTargets
+    .filter((target, index) => index === 0 || (fallbackEnabled && target.fallbackEnabled !== false))
+    .slice(0, Math.max(1, Number(maxAttempts) || 1));
   if (!targets.length) throw new ServiceUnavailableError("No AI provider is configured");
 
   const errors = [];
 
-  for (const target of targets) {
-    const breaker = circuitFor(target.id);
+  for (const [index, target] of targets.entries()) {
+    const breaker = circuitFor(target.id, {
+      failThreshold: options.failureThreshold ?? runtime.failureThreshold ?? target.failureThreshold,
+      resetTimeoutMs: options.recoveryCooldownMs ?? runtime.recoveryCooldownMs ?? target.recoveryCooldownMs,
+    });
     const permit = breaker.allow();
     if (!permit.allowed) {
       logger.warn("AI target circuit open, skipping", { target: target.id, state: permit.state });
@@ -103,17 +118,26 @@ export async function callProvider(messages, options = {}) {
       continue;
     }
 
+    const startedAt = Date.now();
     try {
       const adapter = getAdapterFor(target);
-      const text = await doCall(adapter, messages, {
+      const result = await doCall(adapter, messages, {
         model: target,
         jsonMode: options.jsonMode ?? true,
         timeoutMs: options.timeoutMs ?? target.timeoutMs,
       });
       breaker.recordSuccess();
-      return { text, model: target.chatModel, provider: target.provider, targetId: target.id };
+      const latencyMs = Date.now() - startedAt;
+      await recordProviderSuccess(target.providerId, latencyMs);
+      return {
+        text: result.text,
+        usage: result.usage ?? null,
+        model: target.chatModel,
+        provider: target.provider,
+        targetId: target.id,
+        failoverCount: index,
+      };
     } catch (error) {
-      breaker.recordFailure();
       const normalized =
         error instanceof AppError
           ? error
@@ -122,6 +146,19 @@ export async function callProvider(messages, options = {}) {
               code: "AI_PROVIDER_ERROR",
               details: error?.message ?? String(error),
             });
+      const retryable = isRetryableProviderError(normalized);
+      if (!retryable) {
+        logger.warn("AI target rejected request; failover stopped", {
+          target: target.id,
+          provider: target.provider,
+          code: normalized.code,
+        });
+        throw normalized;
+      }
+      breaker.recordFailure();
+      await recordProviderFailure(target.providerId, normalized.code, Date.now() - startedAt, {
+        open: breaker.snapshot().state === "OPEN",
+      });
       logger.warn("AI target failed, falling through", {
         target: target.id,
         provider: target.provider,
@@ -136,13 +173,21 @@ export async function callProvider(messages, options = {}) {
   throw last ?? new ServiceUnavailableError("All AI providers are unavailable");
 }
 
+export function isRetryableProviderError(error) {
+  if (error?.retryable === false || error?.authenticationFailure || error?.contentSafetyRejection) return false;
+  const status = Number(error?.status);
+  if ([408, 425, 429].includes(status) || status >= 500) return true;
+  return status === 0 || !Number.isFinite(status) || error?.name === "TimeoutError" || error?.name === "AbortError";
+}
+
 async function doCall(adapter, messages, options) {
   const model = options.model;
-  return adapter.chatCompletions(messages, {
+  const result = await adapter.chatCompletions(messages, {
     model,
     timeoutMs: options.timeoutMs ?? model?.timeoutMs ?? 25000,
     jsonMode: options.jsonMode ?? true,
   });
+  return typeof result === "string" ? { text: result, usage: null } : result;
 }
 
 /** Reset one target's circuit breaker, or all of them when no id is given. */

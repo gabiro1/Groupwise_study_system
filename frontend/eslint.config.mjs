@@ -10,6 +10,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Browser evidence is generated output, not application source.
+    "artifacts/**",
+    "test-results/**",
   ]),
 ]);
 

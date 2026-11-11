@@ -1,5 +1,6 @@
 import { query, queryOne, queryRows } from "../config/db.js";
 import logger from "../config/logger.js";
+import env from "../config/env.js";
 
 /**
  * Structured platform settings.
@@ -50,6 +51,36 @@ const DEFAULTS = Object.freeze({
     matchingEnabled: true,
     maxRequestsPerHour: 60,
     timeoutMs: 25_000,
+    maxFailoverAttempts: 3,
+    fallbackEnabled: true,
+    failureThreshold: 3,
+    recoveryCooldownMs: 30_000,
+  },
+  "ai.web": {
+    // The environment flag remains the hard deployment-level gate. These
+    // defaults let an enabled deployment be configured from the admin console.
+    enabled: true,
+    defaultMode: env.AI_WEB_RESEARCH_DEFAULT_MODE,
+    maxQueries: env.AI_WEB_RESEARCH_MAX_QUERIES,
+    maxResults: env.AI_WEB_RESEARCH_MAX_RESULTS,
+    timeoutMs: env.AI_WEB_RESEARCH_TIMEOUT_MS,
+    maxContextChars: env.AI_WEB_RESEARCH_MAX_CONTEXT_CHARS,
+    cacheTtlMin: env.AI_WEB_RESEARCH_CACHE_TTL_MIN,
+    maxRequestsPerHour: env.AI_WEB_RESEARCH_MAX_REQUESTS_PER_HOUR,
+    country: env.AI_WEB_RESEARCH_COUNTRY,
+    language: env.AI_WEB_RESEARCH_LANGUAGE,
+    safeSearch: env.AI_WEB_RESEARCH_SAFESEARCH,
+    allowlistDomains: String(env.AI_WEB_RESEARCH_ALLOWLIST_DOMAINS ?? "")
+      .split(",").map((value) => value.trim()).filter(Boolean),
+    blocklistDomains: String(env.AI_WEB_RESEARCH_BLOCKLIST_DOMAINS ?? "")
+      .split(",").map((value) => value.trim()).filter(Boolean),
+  },
+  "recommendation.runtime": {
+    algorithm: env.RECOMMENDATION_ALGORITHM,
+    personalizationEnabled: env.RECOMMENDATION_PERSONALIZATION_ENABLED === "true",
+    minPersonalizationEvents: env.RECOMMENDATION_MIN_PERSONALIZATION_EVENTS,
+    maxPersonalizationAdjustment: env.RECOMMENDATION_MAX_PERSONALIZATION_ADJUSTMENT,
+    explorationRate: env.RECOMMENDATION_EXPLORATION_RATE,
   },
   "academic.settings": {
     semesters: ["Semester 1", "Semester 2"],
@@ -207,6 +238,29 @@ export async function aiRuntime() {
     matchingEnabled: section.matchingEnabled !== false,
     maxRequestsPerHour: Math.min(1000, Math.max(1, Number(section.maxRequestsPerHour) || 60)),
     timeoutMs: Math.min(120_000, Math.max(1000, Number(section.timeoutMs) || 25_000)),
+    maxFailoverAttempts: Math.min(20, Math.max(1, Number(section.maxFailoverAttempts) || 3)),
+    fallbackEnabled: section.fallbackEnabled !== false,
+    failureThreshold: Math.min(20, Math.max(1, Number(section.failureThreshold) || 3)),
+    recoveryCooldownMs: Math.min(3_600_000, Math.max(1000, Number(section.recoveryCooldownMs) || 30_000)),
+  };
+}
+
+export async function aiWebSearch() {
+  const section = await getSection("ai.web");
+  return {
+    enabled: section.enabled !== false,
+    defaultMode: section.defaultMode ?? env.AI_WEB_RESEARCH_DEFAULT_MODE,
+    maxQueries: Math.min(5, Math.max(1, Number(section.maxQueries) || env.AI_WEB_RESEARCH_MAX_QUERIES)),
+    maxResults: Math.min(20, Math.max(1, Number(section.maxResults) || env.AI_WEB_RESEARCH_MAX_RESULTS)),
+    timeoutMs: Math.min(30_000, Math.max(1000, Number(section.timeoutMs) || env.AI_WEB_RESEARCH_TIMEOUT_MS)),
+    maxContextChars: Math.min(100_000, Math.max(1000, Number(section.maxContextChars) || env.AI_WEB_RESEARCH_MAX_CONTEXT_CHARS)),
+    cacheTtlMin: Math.min(1440, Math.max(0, Number(section.cacheTtlMin) || 0)),
+    maxRequestsPerHour: Math.min(10_000, Math.max(1, Number(section.maxRequestsPerHour) || env.AI_WEB_RESEARCH_MAX_REQUESTS_PER_HOUR)),
+    country: String(section.country ?? env.AI_WEB_RESEARCH_COUNTRY).toUpperCase(),
+    language: String(section.language ?? env.AI_WEB_RESEARCH_LANGUAGE).toLowerCase(),
+    safeSearch: section.safeSearch ?? env.AI_WEB_RESEARCH_SAFESEARCH,
+    allowlistDomains: Array.isArray(section.allowlistDomains) ? section.allowlistDomains : [],
+    blocklistDomains: Array.isArray(section.blocklistDomains) ? section.blocklistDomains : [],
   };
 }
 
@@ -221,4 +275,5 @@ export default {
   maintenanceState,
   registrationPolicy,
   aiRuntime,
+  aiWebSearch,
 };

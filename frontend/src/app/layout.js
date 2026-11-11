@@ -1,6 +1,7 @@
 import { Poppins } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "./ThemeProvider";
+import mkuLogo from "../../Logo/MKU_Logos-high-resolution-1.png";
 
 const poppins = Poppins({
   weight: ["100", "200", "300", "400", "500", "600", "700", "800", "900"],
@@ -9,10 +10,10 @@ const poppins = Poppins({
 });
 
 export const metadata = {
-  title: "Lien",
+  title: "Lien | Mount Kigali University",
   description: "Find study partners, form groups, and learn together with Lien.",
   icons: {
-    icon: "/lien-logo.svg",
+    icon: mkuLogo.src,
   },
 };
 

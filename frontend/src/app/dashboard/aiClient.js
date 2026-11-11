@@ -60,10 +60,10 @@ export function sendRecommendationFeedback(recommendationId, helpful) {
 }
 
 /** POST /api/partners/invitations — request a one-to-one study partner. */
-export function sendPartnerRequest(recipientId) {
+export function sendPartnerRequest(recipientId, recommendationId = null) {
   return request("partners/invitations", {
     method: "POST",
-    body: JSON.stringify({ recipientId }),
+    body: JSON.stringify({ recipientId, recommendationId }),
   });
 }
 
@@ -74,9 +74,9 @@ export function sendPartnerRequest(recipientId) {
  * backend searches every course and group workspace the student can access, so
  * the floating assistant can answer across their whole study space.
  */
-export function askAssistant({ message, workspaceId = null, resourceIds = [], useGroupContext = false }) {
+export function askAssistant({ message, workspaceId = null, resourceIds = [], useGroupContext = false, sourceMode, researchOptions }) {
   return request("ai/chat", {
     method: "POST",
-    body: JSON.stringify({ message, workspaceId, resourceIds, useGroupContext }),
+    body: JSON.stringify({ message, workspaceId, resourceIds, useGroupContext, sourceMode, researchOptions }),
   });
 }

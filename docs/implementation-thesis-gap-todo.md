@@ -95,7 +95,7 @@
 
 Required decision:
 
-- [ ] Either revise the thesis to describe the system as deterministic weighted recommendation with optional AI-assisted search.
+- [x] Revise the thesis-facing explanation to describe a hybrid grounded AI assistant and a deterministic weighted recommendation system; the assistant is not retrained for every student.
 - [ ] Or implement and evaluate a real trained AI/machine-learning matching model.
 - [ ] If the AI provider remains optional, document the fallback behaviour clearly.
 - [ ] Document the AI provider, model, prompt/input constraints, privacy handling, and failure behaviour.

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   parseStudyIntent,
   fetchRecommendations,
@@ -26,6 +26,15 @@ function fullName(item) {
   return [item.firstName, item.lastName].filter(Boolean).join(" ") || "A study partner";
 }
 
+function algorithmLabel(value) {
+  return {
+    WEIGHTED_SCORING: "Weighted scoring",
+    PERSONALIZED_WEIGHTED_SCORING: "Personalized weighted scoring",
+    LEARNING_TO_RANK: "Learning-to-rank",
+    LEARNING_TO_RANK_WITH_PERSONALIZATION: "Learning-to-rank with personalization",
+  }[value] || "Weighted scoring";
+}
+
 /**
  * Natural-language search for a "perfect" group or partner.
  *
@@ -47,6 +56,19 @@ export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, headin
   const [note, setNote] = useState("");
   const [busyId, setBusyId] = useState("");
   const [requestedIds, setRequestedIds] = useState([]);
+  const [modelMeta, setModelMeta] = useState(null);
+  const shownIds = useRef(new Set());
+
+  useEffect(() => {
+    if (loading || !searched) return;
+    const pending = results
+      .map((item) => item.recommendationId)
+      .filter((id) => id && !shownIds.current.has(id));
+    pending.forEach((id) => shownIds.current.add(id));
+    if (pending.length) {
+      Promise.allSettled(pending.map((id) => recordRecommendationOutcome(id, "SHOWN")));
+    }
+  }, [loading, results, searched]);
 
   const isStudent = kind === "STUDENT";
   const title = heading || (isStudent ? "Find your ideal study partner" : "Find your ideal study group");
@@ -90,6 +112,7 @@ export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, headin
     try {
       const data = await fetchRecommendations(payload);
       setResults(data.results || []);
+      setModelMeta(data);
       setSearched(true);
     } catch (requestError) {
       setError(requestError.message);
@@ -152,6 +175,7 @@ export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, headin
         id: recommendation.groupId,
         name: recommendation.name,
         workspaceId: recommendation.workspaceId,
+        recommendationId: recommendation.recommendationId,
       });
       if (result?.status === "JOINED" || result?.status === "REQUESTED") {
         setResults((current) => current.filter((item) => item.recommendationId !== recommendation.recommendationId));
@@ -169,7 +193,7 @@ export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, headin
     setError("");
     try {
       await recordRecommendationOutcome(recommendation.recommendationId, "CLICKED");
-      await sendPartnerRequest(recommendation.studentId);
+      await sendPartnerRequest(recommendation.studentId, recommendation.recommendationId);
       setRequestedIds((current) => [...current, recommendation.studentId]);
       notify("Partner request sent. They can accept it on their Study partners page.");
     } catch (requestError) {
@@ -271,6 +295,7 @@ export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, headin
 
       {error && <div className="feature-error" role="alert">{error}</div>}
       {note && <div className="feature-success" role="status">{note}</div>}
+      {modelMeta && searched && <p className="admin-muted">Ranking source: {algorithmLabel(modelMeta.algorithm)}{modelMeta.degraded ? " · weighted fallback active" : ""}</p>}
 
       {loading && <p className="empty-state" role="status">{isStudent ? "Ranking students who complement your learning…" : "Ranking groups that fit your request…"}</p>}
 
@@ -296,9 +321,10 @@ export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, headin
                     <h2>{fullName(item)}</h2>
                   </div>
                   <span className="match-score" aria-label={`${Math.round(item.score)} percent match`}>
-                    <strong>{Math.round(item.score)}%</strong><small>{item.label}</small>
+                   <strong>{Math.round(item.score)}%</strong><small>{item.label}</small>
                   </span>
                 </div>
+                {item.baselineScore != null && item.algorithm !== "WEIGHTED_SCORING" && <small className="admin-muted">Baseline weighted score: {Math.round(item.baselineScore)}%</small>}
                 <div className="recommendation-reasons">
                   <strong>Why this partner?</strong>
                   {item.reasons?.length
@@ -326,9 +352,10 @@ export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, headin
                   <h2>{item.name}</h2>
                 </div>
                 <span className="match-score" aria-label={`${Math.round(item.score)} percent match`}>
-                  <strong>{Math.round(item.score)}%</strong><small>{item.label}</small>
+                   <strong>{Math.round(item.score)}%</strong><small>{item.label}</small>
                 </span>
               </div>
+              {item.baselineScore != null && item.algorithm !== "WEIGHTED_SCORING" && <small className="admin-muted">Baseline weighted score: {Math.round(item.baselineScore)}%</small>}
               {item.description && <p className="recommendation-description">{item.description}</p>}
               <p className="recommendation-meta">{item.memberCount} {item.memberCount === 1 ? "member" : "members"} · {item.mode?.toLowerCase() || "study mode not specified"}</p>
               <div className="recommendation-reasons">

@@ -186,6 +186,12 @@ export const AUDIT = Object.freeze({
   SETTINGS_UPDATED: "admin.settings.updated",
   SETTING_DELETED: "admin.setting.deleted",
   WEIGHTS_UPDATED: "admin.recommendation.weights.updated",
+  RECOMMENDATION_TRAINING_REQUESTED: "admin.recommendation.training.requested",
+  RECOMMENDATION_MODEL_REGISTERED: "admin.recommendation.model.registered",
+  RECOMMENDATION_MODEL_ACTIVATED: "admin.recommendation.model.activated",
+  RECOMMENDATION_MODEL_DEACTIVATED: "admin.recommendation.model.deactivated",
+  RECOMMENDATION_PERSONALIZATION_UPDATED: "admin.recommendation.personalization.updated",
+  RECOMMENDATION_CIRCUIT_RESET: "admin.recommendation.circuit.reset",
 
   GROUP_CREATED: "group.created",
   GROUP_UPDATED: "group.updated",
@@ -203,6 +209,8 @@ export const AUDIT = Object.freeze({
   GROUP_RESTORED: "admin.group.restored",
   GROUP_ARCHIVED_BY_ADMIN: "admin.group.archived",
   GROUP_MEMBER_REMOVED_BY_ADMIN: "admin.group.member.removed",
+  GROUP_JOIN_REQUEST_DECIDED_BY_ADMIN: "admin.group.join_request.decided",
+  ACCOUNT_DELETED: "admin.account.deleted",
   SESSION_CANCELLED: "admin.session.cancelled",
 
   ANNOUNCEMENT_CREATED: "admin.announcement.created",
@@ -215,6 +223,10 @@ export const AUDIT = Object.freeze({
   AI_CONFIG_UPDATED: "admin.ai.config.updated",
   AI_PROVIDER_RESET: "admin.ai.provider.reset",
   AI_PROVIDER_TESTED: "admin.ai.provider.tested",
+  AI_PROVIDER_CREATED: "admin.ai.provider.created",
+  AI_PROVIDER_UPDATED: "admin.ai.provider.updated",
+  AI_PROVIDER_REMOVED: "admin.ai.provider.removed",
+  AI_PROVIDER_DISCOVERY: "admin.ai.provider.discovery",
 
   ADMIN_BOOTSTRAP: "admin.bootstrap.created",
   USER_UPDATED_BY_ADMIN: "admin.user.updated",

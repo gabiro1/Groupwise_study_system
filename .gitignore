@@ -1,0 +1,10 @@
+# Offline recommendation exports and model artifacts must never enter source control.
+/runtime/
+/ml/recommendation/runtime/
+/ml/recommendation/data/
+/ml/recommendation/artifacts/
+/ml/recommendation/models/
+
+# Python-generated files from the offline package.
+__pycache__/
+*.py[cod]

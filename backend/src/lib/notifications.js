@@ -1,6 +1,7 @@
 import { query, queryRows } from "../config/db.js";
 import { NOTIFICATION_TYPE } from "../config/constants.js";
 import logger from "../config/logger.js";
+import { getSection } from "../services/settings.service.js";
 
 /**
  * Notification delivery.
@@ -99,6 +100,11 @@ export async function notify({ userId, type, title, body, link, metadata = {}, f
   const run = options.tx ?? { query, queryRows };
 
   try {
+    const platformSettings = await getSection("notifications.settings");
+    if (platformSettings.platformNotificationsEnabled === false) {
+      return { created: false, reason: "platform_disabled" };
+    }
+
     const preferences = await run.query(
       `SELECT in_app_enabled, email_enabled, quiet_hours_start, quiet_hours_end, overrides
          FROM notification_preferences WHERE user_id = $1`,

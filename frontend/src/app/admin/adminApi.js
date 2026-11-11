@@ -131,6 +131,23 @@ export const LABELS = {
     ACADEMIC_DISHONESTY: "Academic dishonesty",
     IMPERSONATION: "Impersonation",
     OTHER: "Other",
+    GENERAL: "General",
+    ACADEMIC: "Academic",
+    MAINTENANCE: "Maintenance",
+    SECURITY: "Security",
+    PLATFORM_UPDATE: "Platform update",
+  },
+  announcementStatus: {
+    DRAFT: "Draft",
+    SCHEDULED: "Scheduled",
+    PUBLISHED: "Published",
+    ARCHIVED: "Archived",
+  },
+  announcementAudience: {
+    ALL: "All users",
+    STUDENTS: "Students",
+    GROUP_LEADERS: "Group leaders",
+    ADMINS: "Administrators",
   },
   role: {
     STUDENT: "Student",

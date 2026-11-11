@@ -12,13 +12,13 @@ import { useRef, useState } from "react";
  */
 
 export const CHART_COLORS = {
-  blue: "#3B82F6",
-  green: "#12835B",
-  orange: "#F59E0B",
-  teal: "#0D9488",
-  red: "#F43F5E",
-  slate: "#94A3B8",
-  gold: "#56BD8A",
+  blue: "#2498C8",
+  green: "#176391",
+  orange: "#F47852",
+  teal: "#3EAAC4",
+  red: "#D95C4E",
+  slate: "#7B94A4",
+  gold: "#F4BD32",
 };
 
 function niceMax(value) {

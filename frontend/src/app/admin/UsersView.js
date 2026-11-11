@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { apiRequest, displayName, formatDateTime, labelFor } from "./adminApi";
 import PageHeading from "./PageHeading";
 import AdminModal from "./AdminModal";
+import { EditIcon, RefreshIcon, TrashIcon, UserMinusIcon } from "./AdminIcons";
 import { EmptyState, ErrorState, Skeleton } from "./DataState";
 
 const PAGE_SIZE = 25;
@@ -25,6 +26,12 @@ export default function UsersView() {
   const [busyUser, setBusyUser] = useState("");
   const [suspendTarget, setSuspendTarget] = useState(null);
   const [suspendReason, setSuspendReason] = useState("");
+  const [editTarget, setEditTarget] = useState(null);
+  const [editForm, setEditForm] = useState({ firstName: "", lastName: "", email: "", yearOfStudy: "" });
+  const [editLoading, setEditLoading] = useState(false);
+  const [editError, setEditError] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteReason, setDeleteReason] = useState("");
 
   const buildQuery = useCallback(
     (nextCursor) => {
@@ -153,6 +160,77 @@ export default function UsersView() {
     }
   }
 
+  async function openEdit(user) {
+    setEditTarget(user);
+    setEditLoading(true);
+    setEditError("");
+    try {
+      const result = await apiRequest(`admin/users/${user.id}`);
+      const detail = result.user;
+      setEditForm({
+        firstName: detail.first_name || "",
+        lastName: detail.last_name || "",
+        email: detail.email || "",
+        yearOfStudy: detail.year_of_study ?? "",
+      });
+    } catch (requestError) {
+      setEditError(requestError.message);
+    } finally {
+      setEditLoading(false);
+    }
+  }
+
+  async function saveEdit() {
+    if (!editTarget) return;
+    setBusyUser(`edit:${editTarget.id}`);
+    setEditError("");
+    try {
+      const result = await apiRequest(`admin/users/${editTarget.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          firstName: editForm.firstName.trim(),
+          lastName: editForm.lastName.trim(),
+          email: editForm.email.trim(),
+          yearOfStudy: editForm.yearOfStudy === "" ? null : Number(editForm.yearOfStudy),
+        }),
+      });
+      setMessage(result.emailChanged ? "User details updated. The new email requires verification." : "User details updated.");
+      setEditTarget(null);
+      await reload();
+    } catch (requestError) {
+      setEditError(requestError.message);
+    } finally {
+      setBusyUser("");
+    }
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    if (deleteReason.trim().length < 5) {
+      setError("Give a reason (at least 5 characters) for the audit trail before deleting.");
+      return;
+    }
+    setBusyUser(`delete:${deleteTarget.id}`);
+    setError("");
+    try {
+      const result = await apiRequest(`admin/users/${deleteTarget.id}`, {
+        method: "DELETE",
+        body: JSON.stringify({ reason: deleteReason.trim() }),
+      });
+      const groupMessage = result.groupsArchived
+        ? ` ${result.groupsArchived} owned group${result.groupsArchived === 1 ? " was" : "s were"} archived.`
+        : "";
+      setMessage(`${displayName(deleteTarget)} was removed from the system and all active sessions were revoked.${groupMessage}`);
+      setDeleteTarget(null);
+      setDeleteReason("");
+      await reload();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusyUser("");
+    }
+  }
+
   return (
     <>
       <PageHeading
@@ -240,26 +318,55 @@ export default function UsersView() {
                     <td>{user.group_count ?? 0}</td>
                     <td className="admin-muted">{user.last_login_at ? formatDateTime(user.last_login_at) : "Never"}</td>
                     <td className="admin-col-actions">
+                      <button
+                        className="admin-icon-action"
+                        type="button"
+                        aria-label={`Edit ${displayName(user)}`}
+                        title="Edit user"
+                        disabled={busyUser === `edit:${user.id}`}
+                        onClick={() => openEdit(user)}
+                      >
+                        <EditIcon size={16} />
+                      </button>
                       {user.role !== "ADMIN" && user.status === "ACTIVE" && (
                         <button
-                          className="admin-btn admin-btn-danger"
+                          className="admin-icon-action admin-icon-action-danger"
                           type="button"
+                          aria-label={`Suspend ${displayName(user)}`}
+                          title="Suspend user"
                           onClick={() => {
                             setSuspendTarget(user);
                             setSuspendReason("");
                           }}
                         >
-                          Suspend
+                          <UserMinusIcon size={16} />
                         </button>
                       )}
                       {user.role !== "ADMIN" && user.status === "SUSPENDED" && (
                         <button
-                          className="admin-btn admin-btn-ghost"
+                          className="admin-icon-action"
                           type="button"
+                          aria-label={`Restore ${displayName(user)}`}
+                          title="Restore user"
                           disabled={busyUser === `restore:${user.id}`}
                           onClick={() => restore(user)}
                         >
-                          {busyUser === `restore:${user.id}` ? "…" : "Restore"}
+                          <RefreshIcon size={16} />
+                        </button>
+                      )}
+                      {user.role !== "ADMIN" && user.status !== "DEACTIVATED" && (
+                        <button
+                          className="admin-icon-action admin-icon-action-danger"
+                          type="button"
+                          aria-label={`Delete ${displayName(user)}`}
+                          title="Delete user"
+                          onClick={() => {
+                            setDeleteTarget(user);
+                            setDeleteReason("");
+                            setError("");
+                          }}
+                        >
+                          <TrashIcon size={16} />
                         </button>
                       )}
                       {user.status === "SUSPENDED" && user.suspension_reason && (
@@ -318,6 +425,98 @@ export default function UsersView() {
                 value={suspendReason}
                 onChange={(event) => setSuspendReason(event.target.value)}
                 placeholder="Explain why this account is being suspended."
+              />
+            </label>
+          </>
+        )}
+      </AdminModal>
+
+      <AdminModal
+        open={Boolean(editTarget)}
+        title={editTarget ? `Edit ${displayName(editTarget)}` : "Edit user"}
+        onClose={() => setEditTarget(null)}
+        footer={
+          <>
+            <button className="admin-btn admin-btn-ghost" type="button" onClick={() => setEditTarget(null)}>
+              Cancel
+            </button>
+            <button
+              className="admin-btn admin-btn-primary"
+              type="button"
+              disabled={editLoading || busyUser.startsWith("edit:")}
+              onClick={saveEdit}
+            >
+              {busyUser.startsWith("edit:") ? "Saving…" : "Save changes"}
+            </button>
+          </>
+        }
+      >
+        {editLoading ? (
+          <Skeleton rows={4} />
+        ) : editError ? (
+          <div className="admin-banner admin-banner-error" role="alert">{editError}</div>
+        ) : (
+          <div className="admin-field-grid">
+            <label className="admin-field">
+              <span>First name</span>
+              <input value={editForm.firstName} onChange={(event) => setEditForm((current) => ({ ...current, firstName: event.target.value }))} />
+            </label>
+            <label className="admin-field">
+              <span>Last name</span>
+              <input value={editForm.lastName} onChange={(event) => setEditForm((current) => ({ ...current, lastName: event.target.value }))} />
+            </label>
+            <label className="admin-field" style={{ gridColumn: "1 / -1" }}>
+              <span>Email address</span>
+              <input type="email" value={editForm.email} onChange={(event) => setEditForm((current) => ({ ...current, email: event.target.value }))} />
+            </label>
+            <label className="admin-field">
+              <span>Year of study</span>
+              <input type="number" min="1" max="10" value={editForm.yearOfStudy} onChange={(event) => setEditForm((current) => ({ ...current, yearOfStudy: event.target.value }))} />
+            </label>
+            <p className="admin-muted" style={{ gridColumn: "1 / -1" }}>
+              Changing an email address resets verification and revokes the user&apos;s active sessions.
+            </p>
+          </div>
+        )}
+      </AdminModal>
+
+      <AdminModal
+        open={Boolean(deleteTarget)}
+        title="Delete user account"
+        onClose={() => setDeleteTarget(null)}
+        footer={
+          <>
+            <button className="admin-btn admin-btn-ghost" type="button" onClick={() => setDeleteTarget(null)}>
+              Cancel
+            </button>
+            <button
+              className="admin-btn admin-btn-danger"
+              type="button"
+              disabled={busyUser.startsWith("delete:")}
+              onClick={confirmDelete}
+            >
+              {busyUser.startsWith("delete:") ? "Deleting…" : "Delete account"}
+            </button>
+          </>
+        }
+      >
+        {deleteTarget && (
+          <>
+            <p>
+              This will deactivate <strong>{displayName(deleteTarget)}</strong> ({deleteTarget.email}), revoke active sessions,
+              archive any active groups they own, remove active group memberships, and cancel pending invitations and join
+              requests. The account is soft-deleted so academic history remains intact.
+            </p>
+            <label className="admin-field">
+              <span>Reason (recorded in the audit log)</span>
+              <textarea
+                required
+                minLength={5}
+                rows={3}
+                maxLength={500}
+                value={deleteReason}
+                onChange={(event) => setDeleteReason(event.target.value)}
+                placeholder="Explain why this account is being removed."
               />
             </label>
           </>

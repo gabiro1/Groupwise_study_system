@@ -5,6 +5,7 @@ import { requireStudent, requireAuth, requireAdmin } from "../middleware/auth.js
 import { searchLimiter, aiLimiter, writeLimiter } from "../middleware/rateLimit.js";
 import * as recommendations from "../services/recommendation.service.js";
 import { parseNaturalLanguage, aiStatus } from "../services/ai.service.js";
+import { getTargetsAsync } from "../modules/ai/registry.js";
 import {
   recommendationRequestSchema,
   recommendationFeedbackSchema,
@@ -12,7 +13,6 @@ import {
   aiIntentSchema,
   z,
 } from "../lib/schemas.js";
-import env from "../config/env.js";
 
 const router = Router();
 const recommendationIdParamSchema = z.object({ recommendationId: z.string().uuid() });
@@ -89,6 +89,16 @@ router.get(
   asyncHandler(async (_req, res) => {
     const model = await recommendations.currentModel();
     return ok(res, { model });
+  }),
+);
+
+/** GET /api/recommendations/personalization — the caller's own safe status. */
+router.get(
+  "/personalization",
+  requireStudent,
+  asyncHandler(async (req, res) => {
+    const result = await recommendations.personalizationStatus(req.user.id);
+    return ok(res, result);
   }),
 );
 
@@ -218,7 +228,7 @@ router.post(
 
     // No provider configured is a normal state, not an error: the client is told
     // to fall back to the structured form.
-    if (!env.aiEnabled) {
+    if (!(await getTargetsAsync()).length) {
       return ok(res, {
         available: false,
         reason: "AI_INTENT_DISABLED",
@@ -236,7 +246,10 @@ router.post(
 router.get(
   "/ai-status",
   requireStudent,
-  asyncHandler(async (_req, res) => ok(res, { ai: aiStatus() })),
+  asyncHandler(async (_req, res) => {
+    await getTargetsAsync();
+    return ok(res, { ai: aiStatus() });
+  }),
 );
 
 /**

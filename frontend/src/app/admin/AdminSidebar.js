@@ -3,11 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import BrandLogo from "../BrandLogo";
 import { apiRequest, displayName, initialsFor } from "./adminApi";
 import {
   BookOpenIcon,
   CalendarIcon,
-  CapIcon,
   ChartIcon,
   ChevronDownIcon,
   ClipboardIcon,
@@ -113,13 +113,7 @@ export default function AdminSidebar({ user, system, onNavigate }) {
   return (
     <aside className="admin-sidebar" aria-label="Admin navigation">
       <Link className="admin-brand" href="/admin" onClick={onNavigate}>
-        <span className="admin-brand-mark" aria-hidden="true">
-          <CapIcon size={20} />
-        </span>
-        <span className="admin-brand-text">
-          <strong>Lien</strong>
-          <small>Study Together. Grow Together.</small>
-        </span>
+        <BrandLogo className="admin-logo" title="Mount Kigali University admin home" />
       </Link>
 
       <div className="admin-profile" ref={menuRef}>

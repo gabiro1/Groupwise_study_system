@@ -2,6 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { getAiStatus, askAssistant } from "./aiClient";
+import {
+  AnswerSources,
+  FeedbackButtons,
+  SourceModeNotice,
+  SourceModeSelector,
+} from "./AiAnswerSources";
 
 function BubbleIcon({ size = 22 }) {
   return (
@@ -45,9 +51,12 @@ export default function FloatingAssistant() {
       role: "assistant",
       content: "Hi! I’m your Lien study assistant. Ask me about your courses, groups, partners, or anything your group has shared.",
       sources: [],
+      sourceMode: "LOCAL",
+      showEvidence: false,
     },
   ]);
   const [input, setInput] = useState("");
+  const [sourceMode, setSourceMode] = useState("LOCAL");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const scrollRef = useRef(null);
@@ -55,7 +64,7 @@ export default function FloatingAssistant() {
   useEffect(() => {
     let active = true;
     getAiStatus()
-      .then((data) => { if (active) setStatus(data.ai || null); })
+      .then((data) => { if (active) setStatus(data || null); })
       .catch(() => { if (active) setStatus(null); })
       .finally(() => { if (active) setStatusLoaded(true); });
     return () => { active = false; };
@@ -67,7 +76,8 @@ export default function FloatingAssistant() {
     }
   }, [messages, open, busy]);
 
-  const configured = status?.configured !== false;
+  const configured = status?.ai?.configured !== false;
+  const webEnabled = Boolean(status?.capabilities?.webResearch);
 
   async function send(event) {
     event.preventDefault();
@@ -78,13 +88,16 @@ export default function FloatingAssistant() {
     setBusy(true);
     setError("");
     try {
-      const response = await askAssistant({ message: question });
+      const response = await askAssistant({ message: question, sourceMode });
       if (response.available === false) {
-        setStatus((current) => (current ? { ...current, configured: false } : { configured: false }));
         setMessages((current) => [...current, {
           role: "assistant",
           content: response.message || "The assistant is unavailable right now.",
           sources: [],
+          searches: [],
+          limitations: response.limitations || [],
+          sourceMode: response.sourceMode || sourceMode,
+          showEvidence: true,
         }]);
         return;
       }
@@ -92,6 +105,12 @@ export default function FloatingAssistant() {
         role: "assistant",
         content: response.answer || response.message || "I couldn’t find anything in your material that answers that.",
         sources: response.sources || [],
+        searches: response.searches || [],
+        limitations: response.limitations || [],
+        sourcesDisagree: response.sourcesDisagree,
+        sourceMode: response.sourceMode || sourceMode,
+        feedback: null,
+        showEvidence: true,
       }]);
     } catch (requestError) {
       setError(requestError.message);
@@ -107,7 +126,7 @@ export default function FloatingAssistant() {
           <header className="floating-assistant-head">
             <div>
               <strong>Lien study assistant</strong>
-              <small>{configured ? "Answers from your study material" : "Assistant is off"}</small>
+            <small>{configured ? "Grounded study help" : "Assistant is off"}</small>
             </div>
             <button type="button" className="floating-assistant-close" aria-label="Close assistant" onClick={() => setOpen(false)}>
               <CloseIcon />
@@ -121,19 +140,24 @@ export default function FloatingAssistant() {
             </div>
           )}
 
+          {configured && (
+            <div className="floating-assistant-controls">
+              <SourceModeSelector id="floating-assistant-source-mode" value={sourceMode} onChange={setSourceMode} disabled={busy} webEnabled={webEnabled} />
+              <SourceModeNotice sourceMode={sourceMode} />
+              {!webEnabled && ["WEB", "BOTH"].includes(sourceMode) && <div className="ai-web-disabled" role="status">Internet research is disabled or unavailable. Choose My study material or Automatic.</div>}
+            </div>
+          )}
+
           <div className="floating-assistant-messages" ref={scrollRef}>
             {messages.map((message, index) => (
               <article className={`workspace-message ${message.role}`} key={`${message.role}-${index}`}>
                 <strong>{message.role === "user" ? "You" : "Lien study assistant"}</strong>
                 <p>{message.content}</p>
-                {message.sources?.map((source) => (
-                  <small className="ai-source" key={source.resourceId}>
-                    Source: {source.title}{source.excerpt ? ` — “${source.excerpt}”` : ""}
-                  </small>
-                ))}
+                {message.showEvidence && <AnswerSources sources={message.sources} searches={message.searches} sourcesDisagree={message.sourcesDisagree} limitations={message.limitations} />}
+                {message.showEvidence && message.role === "assistant" && <FeedbackButtons value={message.feedback} onChange={(value) => setMessages((current) => current.map((entry, entryIndex) => entryIndex === index ? { ...entry, feedback: value } : entry))} />}
               </article>
             ))}
-            {busy && <article className="workspace-message assistant"><strong>Lien study assistant</strong><p>Looking through your material…</p></article>}
+            {busy && <article className="workspace-message assistant"><strong>Lien study assistant</strong><p>{sourceMode === "WEB" || sourceMode === "BOTH" ? "Researching public sources…" : sourceMode === "AUTO" ? "Checking your study material first…" : "Looking through your material…"}</p></article>}
           </div>
 
           {error && <div className="feature-error" role="alert">{error}</div>}

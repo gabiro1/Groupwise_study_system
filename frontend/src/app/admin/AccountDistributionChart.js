@@ -5,10 +5,10 @@ import { DonutChart } from "./Charts";
 import { ErrorState, Skeleton } from "./DataState";
 
 const STATUS_COLORS = {
-  ACTIVE: "#10B981",
-  SUSPENDED: "#F43F5E",
-  PENDING_VERIFICATION: "#F59E0B",
-  DEACTIVATED: "#94A3B8",
+  ACTIVE: "#2498C8",
+  SUSPENDED: "#D95C4E",
+  PENDING_VERIFICATION: "#F4BD32",
+  DEACTIVATED: "#7B94A4",
 };
 
 export default function AccountDistributionChart({ distribution, loading, error, onRetry }) {

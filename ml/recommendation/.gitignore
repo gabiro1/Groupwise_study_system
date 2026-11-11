@@ -1,0 +1,12 @@
+data/
+artifacts/
+models/
+runtime/
+__pycache__/
+tests/__pycache__/
+*.py[cod]
+*.jsonl
+*.csv
+*.txt
+!requirements.txt
+!README.md

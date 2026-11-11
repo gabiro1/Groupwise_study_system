@@ -316,6 +316,7 @@ router.post(
       req.params.requestId,
       req.body.decision,
       req.body.note,
+      { expectedGroupId: req.params.groupId },
     );
     return ok(res, result);
   }),

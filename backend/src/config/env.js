@@ -57,11 +57,58 @@ const schema = z.object({
   AI_TIMEOUT_MS: z.coerce.number().int().positive().default(25000),
   AI_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(900),
   AI_CACHE_TTL_MIN: z.coerce.number().int().positive().default(30),
+  // Required only when database-managed AI providers are used. The value is
+  // hashed into a 256-bit AES key and is never returned by an API endpoint.
+  AI_CREDENTIAL_ENCRYPTION_KEY: z.string().min(32).optional(),
   // Optional ordered failover chain, as a JSON array. Each entry is either
   //   { provider, adapter?, label?, baseUrl, apiKey, models: [...] }
   // or the single-model form { ..., model: "..." }. Targets are tried in order:
   // the primary (AI_PROVIDER) first, then each fallback model. See registry.js.
   AI_FALLBACKS: z.string().optional(),
+
+  // Web research is an independent, opt-in capability. Missing keys never
+  // prevent the application from starting; the registry reports it as disabled.
+  AI_WEB_RESEARCH_ENABLED: z.enum(["true", "false"]).default("false"),
+  AI_WEB_RESEARCH_DEFAULT_MODE: z.enum(["LOCAL", "WEB", "BOTH", "AUTO"]).default("LOCAL"),
+  AI_WEB_RESEARCH_MAX_QUERIES: z.coerce.number().int().positive().max(5).default(2),
+  AI_WEB_RESEARCH_MAX_RESULTS: z.coerce.number().int().positive().max(20).default(8),
+  AI_WEB_RESEARCH_TIMEOUT_MS: z.coerce.number().int().positive().max(30_000).default(10_000),
+  AI_WEB_RESEARCH_MAX_CONTEXT_CHARS: z.coerce.number().int().positive().max(100_000).default(24_000),
+  AI_WEB_RESEARCH_CACHE_TTL_MIN: z.coerce.number().int().min(0).max(1440).default(30),
+  AI_WEB_RESEARCH_MAX_REQUESTS_PER_HOUR: z.coerce.number().int().positive().max(10_000).default(20),
+  AI_WEB_RESEARCH_COUNTRY: z.string().trim().regex(/^[A-Za-z]{2}$/, "AI_WEB_RESEARCH_COUNTRY must be an ISO two-letter code.").default("RW"),
+  AI_WEB_RESEARCH_LANGUAGE: z.string().trim().min(2).max(12).default("en"),
+  AI_WEB_RESEARCH_SAFESEARCH: z.enum(["off", "moderate", "strict"]).default("strict"),
+  AI_WEB_RESEARCH_ALLOWLIST_DOMAINS: z.string().default(""),
+  AI_WEB_RESEARCH_BLOCKLIST_DOMAINS: z.string().default(""),
+  AI_WEB_RESEARCH_STORE_RAW_CONTENT: z.enum(["true", "false"]).default("false"),
+
+  WEB_SEARCH_PROVIDER: z.enum(["none", "brave", "tavily"]).default("brave"),
+  WEB_SEARCH_FALLBACK_PROVIDER: z.enum(["none", "brave", "tavily"]).default("tavily"),
+  BRAVE_SEARCH_API_KEY: z.string().optional(),
+  BRAVE_SEARCH_BASE_URL: z.string().url().default("https://api.search.brave.com/res/v1"),
+  TAVILY_API_KEY: z.string().optional(),
+  TAVILY_BASE_URL: z.string().url().default("https://api.tavily.com"),
+
+  // Recommendation learning is opt-in. The deterministic weighted scorer is
+  // still used when any learned-model gate is missing or unsafe.
+  RECOMMENDATION_ALGORITHM: z.enum(["WEIGHTED_SCORING", "LEARNING_TO_RANK"]).default("WEIGHTED_SCORING"),
+  RECOMMENDATION_PERSONALIZATION_ENABLED: z.enum(["true", "false"]).default("false"),
+  RECOMMENDATION_MODEL_SERVICE_URL: z.union([z.literal(""), z.string().url()]).default(""),
+  RECOMMENDATION_MODEL_SERVICE_TOKEN: z.string().optional(),
+  RECOMMENDATION_MODEL_TIMEOUT_MS: z.coerce.number().int().positive().max(10_000).default(1500),
+  RECOMMENDATION_MIN_TRAINING_REQUESTS: z.coerce.number().int().positive().default(500),
+  RECOMMENDATION_MIN_TRAINING_STUDENTS: z.coerce.number().int().positive().default(100),
+  RECOMMENDATION_MIN_LABELLED_ROWS: z.coerce.number().int().positive().default(10_000),
+  RECOMMENDATION_MIN_POSITIVE_OUTCOMES: z.coerce.number().int().positive().default(100),
+  RECOMMENDATION_MIN_NEGATIVE_OUTCOMES: z.coerce.number().int().positive().default(100),
+  RECOMMENDATION_MIN_INTERACTIONS: z.coerce.number().int().positive().default(20),
+  RECOMMENDATION_MIN_COURSES: z.coerce.number().int().positive().default(5),
+  RECOMMENDATION_MIN_LABEL_DIVERSITY: z.coerce.number().int().min(2).max(7).default(3),
+  RECOMMENDATION_MAX_PERSONALIZATION_ADJUSTMENT: z.coerce.number().positive().max(20).default(4),
+  RECOMMENDATION_MIN_PERSONALIZATION_EVENTS: z.coerce.number().int().positive().default(5),
+  RECOMMENDATION_EXPLORATION_RATE: z.coerce.number().min(0).max(0.2).default(0),
+  RECOMMENDATION_MODEL_CACHE_TTL_MIN: z.coerce.number().int().min(0).max(1440).default(10),
 
   EMBEDDING_DIMENSIONS: z.coerce.number().int().positive().default(1536),
 
@@ -191,6 +238,7 @@ export const env = Object.freeze({
   cookieSecure: raw.COOKIE_SECURE === "true",
   prettyLogs: raw.LOG_PRETTY === "true",
   aiEnabled: primaryAiConfigured || countAiFallbackModels(raw.AI_FALLBACKS) > 0,
+  webSearchEnabled: raw.AI_WEB_RESEARCH_ENABLED === "true",
   livekitConfigured: Boolean(raw.LIVEKIT_URL && raw.LIVEKIT_API_KEY && raw.LIVEKIT_API_SECRET),
   jitsiDomain: raw.JITSI_DOMAIN,
   jitsiRoomPrefix: raw.JITSI_ROOM_PREFIX,

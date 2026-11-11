@@ -2,6 +2,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { getAiStatus } from "./aiClient";
+import {
+  AnswerSources,
+  FeedbackButtons,
+  SourceModeNotice,
+  SourceModeSelector,
+} from "./AiAnswerSources";
 
 async function apiRequest(path, options = {}) {
   const isMultipart = typeof FormData !== "undefined" && options.body instanceof FormData;
@@ -57,6 +64,8 @@ export default function StudyWorkspace({ workspaceId, initialTab = "Overview", i
   const [groupTopics, setGroupTopics] = useState([]);
   const [aiMessages, setAiMessages] = useState([]);
   const [aiAvailable, setAiAvailable] = useState(null);
+  const [aiStatus, setAiStatus] = useState(null);
+  const [aiSourceMode, setAiSourceMode] = useState("LOCAL");
   const [aiQuestion, setAiQuestion] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -121,6 +130,15 @@ export default function StudyWorkspace({ workspaceId, initialTab = "Overview", i
       setResourceForm((current) => ({ ...current, kind: "NOTE" }));
     }
   }, [initialResourceKind]);
+
+  useEffect(() => {
+    if (activeTab !== "Ask AI") return undefined;
+    let active = true;
+    getAiStatus()
+      .then((data) => { if (active) setAiStatus(data); })
+      .catch(() => { if (active) setAiStatus(null); });
+    return () => { active = false; };
+  }, [activeTab]);
 
   useEffect(() => {
     if (activeTab !== "Group chat") return undefined;
@@ -285,7 +303,7 @@ export default function StudyWorkspace({ workspaceId, initialTab = "Overview", i
     try {
       const response = await apiRequest("ai/chat", {
         method: "POST",
-        body: JSON.stringify({ workspaceId, message: question, resourceIds: [], useGroupContext: true }),
+        body: JSON.stringify({ workspaceId, message: question, resourceIds: [], useGroupContext: true, sourceMode: aiSourceMode }),
       });
       setAiAvailable(response.available);
       setAiMessages((current) => [
@@ -295,6 +313,12 @@ export default function StudyWorkspace({ workspaceId, initialTab = "Overview", i
           role: "assistant",
           content: response.answer || response.message || "I couldn’t find an answer in your group’s shared study material.",
           sources: response.sources || [],
+          searches: response.searches || [],
+          limitations: response.limitations || [],
+          sourcesDisagree: response.sourcesDisagree,
+          sourceMode: response.sourceMode || aiSourceMode,
+          feedback: null,
+          showEvidence: true,
         },
       ]);
       setAiQuestion("");
@@ -511,13 +535,18 @@ export default function StudyWorkspace({ workspaceId, initialTab = "Overview", i
           {activeTab === "Ask AI" && (
             <section className="panel workspace-chat">
               <div className="section-heading"><div><span className="section-overline">STUDY ASSISTANT</span><h2>Ask about your group’s material</h2></div></div>
-              <p className="feature-muted">Answers are grounded in accessible group resources and recent discussion. If there’s no supporting material, Lien will say so.</p>
-              {aiAvailable === false && <div className="feature-error" role="status">The AI assistant is currently unavailable. You can still use your group’s shared resources and chat.</div>}
+              <p className="feature-muted">Choose whether the answer should use your group’s material, public research, or both. Unsupported claims are left unanswered.</p>
+              <div className="workspace-ai-controls">
+                <SourceModeSelector id="workspace-ai-source-mode" value={aiSourceMode} onChange={setAiSourceMode} disabled={busy} webEnabled={Boolean(aiStatus?.capabilities?.webResearch)} />
+                <SourceModeNotice sourceMode={aiSourceMode} />
+              </div>
+              {aiAvailable === false && <div className="feature-error" role="status">The AI assistant or selected research provider is currently unavailable. You can still use your group’s shared resources and chat.</div>}
+              {aiStatus?.webSearch?.enabled === false && ["WEB", "BOTH"].includes(aiSourceMode) && <div className="ai-web-disabled" role="status">Internet research is disabled by the administrator. Choose My study material or Automatic.</div>}
               <div className="workspace-message-list" aria-live="polite">
                 {aiMessages.length === 0 && <p className="empty-state">Try asking about a shared note or how to approach a topic your group is studying.</p>}
-                {aiMessages.map((message, index) => <article className={`workspace-message ${message.role}`} key={`${message.role}-${index}`}><strong>{message.role === "user" ? "You" : "Lien study assistant"}</strong><p>{message.content}</p>{message.sources?.map((source) => <small className="ai-source" key={source.resourceId}>Source: {source.title}{source.excerpt ? ` — “${source.excerpt}”` : ""}</small>)}</article>)}
+                {aiMessages.map((message, index) => <article className={`workspace-message ${message.role}`} key={`${message.role}-${index}`}><strong>{message.role === "user" ? "You" : "Lien study assistant"}</strong><p>{message.content}</p>{message.showEvidence && <AnswerSources sources={message.sources} searches={message.searches} sourcesDisagree={message.sourcesDisagree} limitations={message.limitations} />}{message.showEvidence && message.role === "assistant" && <FeedbackButtons value={message.feedback} onChange={(value) => setAiMessages((current) => current.map((entry, entryIndex) => entryIndex === index ? { ...entry, feedback: value } : entry))} />}</article>)}
               </div>
-              <form className="workspace-message-form" onSubmit={askAi}><label className="sr-only" htmlFor="workspace-ai-question">Ask a study question</label><textarea id="workspace-ai-question" rows={2} maxLength={2000} value={aiQuestion} onChange={(event) => setAiQuestion(event.target.value)} placeholder="Ask about your group’s shared material…" /><button className="button button-primary" disabled={busy || !aiQuestion.trim()}>Ask</button></form>
+              <form className="workspace-message-form" onSubmit={askAi}><label className="sr-only" htmlFor="workspace-ai-question">Ask a study question</label><textarea id="workspace-ai-question" rows={2} maxLength={2000} value={aiQuestion} onChange={(event) => setAiQuestion(event.target.value)} placeholder={aiSourceMode === "WEB" ? "Ask for public research…" : "Ask about your group’s shared material…"} /><button className="button button-primary" disabled={busy || !aiQuestion.trim()}>Ask</button></form>
             </section>
           )}
           {activeTab === "Progress & feedback" && (

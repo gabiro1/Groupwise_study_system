@@ -87,10 +87,6 @@ function buildSystemPrompt({ courses, topics, goals }) {
 export async function parseNaturalLanguage(text, eligible, studentId) {
 // `aiEnabled` requires both a provider and an API key, so a half-configured
   // deployment degrades rather than sending unauthenticated requests.
-  if (!env.aiEnabled) {
-    throw new AiUnavailableError();
-  }
-
   const systemPrompt = buildSystemPrompt(eligible);
 
   const startedAt = process.hrtime.bigint();

@@ -1392,7 +1392,10 @@ export default function DashboardWorkspace({ section = "overview", workspaceId, 
 
   async function joinGroup(group) {
     try {
-      const result = await apiRequest(`study-groups/${group.id}/join`, { method: "POST", body: "{}" });
+      const result = await apiRequest(`study-groups/${group.id}/join`, {
+        method: "POST",
+        body: JSON.stringify({ recommendationId: group.recommendationId ?? null }),
+      });
       const joined = result.status === "JOINED";
       setNotice(joined ? "You’ve joined the study group." : "Your request to join was sent.");
       setDiscoveredGroups((current) => current.map((item) => item.id === group.id

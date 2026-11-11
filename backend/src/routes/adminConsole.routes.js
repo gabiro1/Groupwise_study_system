@@ -13,6 +13,7 @@ import { NOTIFICATION_TYPE } from "../config/constants.js";
 import {
   userIdParamSchema,
   adminUpdateUserSchema,
+  adminDeleteUserSchema,
   adminChangeUserRoleSchema,
   adminSuspendUserSchema,
   adminRestoreUserSchema,
@@ -22,6 +23,8 @@ import {
   adminGroupRestoreSchema,
   adminGroupArchiveSchema,
   adminGroupMemberParamSchema,
+  adminGroupJoinRequestParamSchema,
+  adminGroupJoinRequestDecisionSchema,
   sessionIdParamSchema,
   adminSessionCancelSchema,
   reportIdParamSchema,
@@ -33,16 +36,22 @@ import {
   settingSectionKeySchema,
   settingSectionSchemas,
   aiRuntimeUpdateSchema,
+  aiWebUpdateSchema,
   aiUsageQuerySchema,
+  aiProviderCreateSchema,
+  aiProviderUpdateSchema,
+  aiProviderIdSchema,
   adminAuditQuerySchema,
   z,
 } from "../lib/schemas.js";
 import * as announcements from "../services/announcement.service.js";
 import * as settings from "../services/settings.service.js";
 import * as aiConfig from "../services/aiConfig.service.js";
+import * as aiProviders from "../services/aiProvider.service.js";
 import { aiStatus } from "../services/ai.service.js";
-import { getTargets, configuredKeys, configuredEmbeddingModel } from "../modules/ai/registry.js";
+import { getTargets, getTargetsAsync } from "../modules/ai/registry.js";
 import { getCircuitSnapshot, resetCircuit } from "../modules/ai/orchestration.js";
+import * as groups from "../services/group.service.js";
 
 /**
  * Administrative console.
@@ -61,6 +70,8 @@ import { getCircuitSnapshot, resetCircuit } from "../modules/ai/orchestration.js
  */
 
 const router = Router();
+
+const aiConfigUpdateSchema = aiRuntimeUpdateSchema.extend({ web: aiWebUpdateSchema.optional() });
 
 router.use(requireAuth);
 router.use(requireAdmin);
@@ -309,6 +320,162 @@ router.patch(
     }, "console:updateUser");
 
     return ok(res, updated);
+  }),
+);
+
+/** DELETE /api/admin/users/:userId — soft-delete an account and revoke access. */
+router.delete(
+  "/users/:userId",
+  writeLimiter,
+  validate({ params: userIdParamSchema, body: adminDeleteUserSchema }),
+  asyncHandler(async (req, res) => {
+    const { userId } = req.params;
+    const { reason } = req.body;
+
+    if (userId === req.user.id) {
+      throw new ForbiddenError("You cannot delete your own administrator account.");
+    }
+
+    const result = await withTransaction(async (tx) => {
+      const target = await tx.queryOne(
+        `SELECT u.id, u.email, u.first_name, u.last_name, u.status, r.key AS role
+           FROM users u
+           JOIN roles r ON r.id = u.role_id
+          WHERE u.id = $1 AND u.deleted_at IS NULL
+          FOR UPDATE OF u`,
+        [userId],
+        "console:loadUserForDelete",
+      );
+      if (!target) throw new NotFoundError("That user");
+      if (target.role === "ADMIN") {
+        throw new ForbiddenError("Administrator accounts cannot be deleted from the console.");
+      }
+      if (target.status === "DEACTIVATED") {
+        throw new ConflictError("That account is already deactivated.");
+      }
+
+      const ownedGroups = await tx.queryRows(
+        `SELECT id, name, status
+           FROM study_groups
+          WHERE owner_id = $1 AND status IN ('ACTIVE', 'SUSPENDED')
+          FOR UPDATE`,
+        [userId],
+        "console:ownedGroupsForDelete",
+      );
+
+      // An account cannot be removed while its groups still point at it as
+      // owner. Archive those groups first so the admin action remains atomic,
+      // preserves their academic history, and does not leave orphaned active
+      // workspaces or pending requests behind.
+      for (const group of ownedGroups) {
+        await tx.query(
+          `UPDATE study_groups
+              SET status = 'ARCHIVED', archived_at = now(), updated_at = now()
+            WHERE id = $1 AND status IN ('ACTIVE', 'SUSPENDED')`,
+          [group.id],
+          "console:archiveOwnedGroupForDelete",
+        );
+        await tx.query(
+          `UPDATE workspaces SET is_archived = TRUE, archived_at = now()
+            WHERE id IN (SELECT workspace_id FROM workspace_groups WHERE group_id = $1)
+              AND NOT is_archived`,
+          [group.id],
+          "console:archiveOwnedGroupWorkspacesForDelete",
+        );
+        await tx.query(
+          "UPDATE study_group_invitations SET status = 'CANCELLED' WHERE group_id = $1 AND status = 'PENDING'",
+          [group.id],
+          "console:cancelOwnedGroupInvitationsForDelete",
+        );
+        await tx.query(
+          "UPDATE study_group_join_requests SET status = 'CANCELLED' WHERE group_id = $1 AND status = 'PENDING'",
+          [group.id],
+          "console:cancelOwnedGroupRequestsForDelete",
+        );
+        await recordAudit(
+          {
+            actor: actor(req),
+            req,
+            action: AUDIT.GROUP_ARCHIVED_BY_ADMIN,
+            entityType: "study_group",
+            entityId: group.id,
+            metadata: {
+              previousStatus: group.status,
+              reason: "Owner account deleted",
+              accountDeletion: true,
+              ownerId: userId,
+            },
+          },
+          { tx },
+        );
+      }
+
+      const deleted = await tx.queryOne(
+        `UPDATE users
+            SET status = 'DEACTIVATED', deleted_at = now(), updated_at = now()
+          WHERE id = $1 AND deleted_at IS NULL
+          RETURNING id, email, first_name, last_name, status, deleted_at`,
+        [userId],
+        "console:deleteUser",
+      );
+      if (!deleted) throw new ConflictError("That account changed state. Try again.");
+
+      const sessions = await tx.query(
+        `UPDATE auth_sessions
+            SET revoked_at = now(), revoked_reason = 'admin_delete'
+          WHERE user_id = $1 AND revoked_at IS NULL`,
+        [userId],
+        "console:revokeDeletedUserSessions",
+      );
+      await tx.query(
+        `UPDATE auth_tokens SET consumed_at = now()
+          WHERE user_id = $1 AND consumed_at IS NULL`,
+        [userId],
+        "console:consumeDeletedUserTokens",
+      );
+      await tx.query(
+        `UPDATE study_group_members
+            SET left_at = COALESCE(left_at, now()), status = 'DEACTIVATED'
+          WHERE student_id = $1 AND left_at IS NULL`,
+        [userId],
+        "console:closeDeletedUserMemberships",
+      );
+      await tx.query(
+        "UPDATE study_group_join_requests SET status = 'CANCELLED', decided_by = $2, decided_at = now() WHERE student_id = $1 AND status = 'PENDING'",
+        [userId, req.user.id],
+        "console:cancelDeletedUserRequests",
+      );
+      await tx.query(
+        "UPDATE study_group_invitations SET status = 'CANCELLED', responded_at = now() WHERE invitee_id = $1 AND status = 'PENDING'",
+        [userId],
+        "console:cancelDeletedUserInvitations",
+      );
+
+      await recordAudit(
+        {
+          actor: actor(req),
+          req,
+          action: AUDIT.ACCOUNT_DELETED,
+          entityType: "user",
+          entityId: userId,
+          metadata: {
+            email: target.email,
+            reason,
+            previousStatus: target.status,
+            sessionsRevoked: sessions.rowCount ?? 0,
+          },
+        },
+        { tx },
+      );
+
+      return {
+        user: deleted,
+        sessionsRevoked: sessions.rowCount ?? 0,
+        groupsArchived: ownedGroups.length,
+      };
+    }, "console:deleteUser");
+
+    return ok(res, { deleted: true, ...result });
   }),
 );
 
@@ -630,6 +797,8 @@ router.get(
               g.suspended_at, g.suspended_reason, g.created_at,
               c.course_code, c.name AS course_name,
               owner.first_name AS owner_first_name, owner.last_name AS owner_last_name, owner.id AS owner_id,
+              (SELECT count(*)::int FROM study_group_join_requests jr
+                WHERE jr.group_id = g.id AND jr.status = 'PENDING') AS pending_requests,
               (SELECT count(*)::int FROM session_participants sp
                  JOIN study_sessions s ON s.id = sp.session_id
                  JOIN workspaces w ON w.id = s.workspace_id
@@ -678,7 +847,7 @@ router.get(
     );
     if (!group) throw new NotFoundError("That group");
 
-    const [members, sessions, reports, counts] = await Promise.all([
+    const [members, joinRequests, sessions, reports, counts] = await Promise.all([
       queryRows(
         `SELECT m.student_id, m.role, m.status, m.joined_at, m.last_active_at,
                 u.email, u.first_name, u.last_name, u.avatar_url, u.status AS account_status
@@ -688,6 +857,16 @@ router.get(
           ORDER BY CASE m.role WHEN 'OWNER' THEN 0 WHEN 'MODERATOR' THEN 1 ELSE 2 END, m.joined_at`,
         [groupId],
         "console:groupMembers",
+      ),
+      queryRows(
+        `SELECT jr.id, jr.message, jr.compatibility_score, jr.created_at,
+                u.id AS student_id, u.email, u.first_name, u.last_name, u.avatar_url
+           FROM study_group_join_requests jr
+           JOIN users u ON u.id = jr.student_id
+          WHERE jr.group_id = $1 AND jr.status = 'PENDING'
+          ORDER BY jr.created_at ASC`,
+        [groupId],
+        "console:groupJoinRequests",
       ),
       queryRows(
         `SELECT s.id, s.title, s.status, s.starts_at, s.ends_at, s.mode, s.cancelled_by,
@@ -723,7 +902,40 @@ router.get(
       ),
     ]);
 
-    return ok(res, { group, members, sessions, reports, counts });
+    return ok(res, { group, members, joinRequests, sessions, reports, counts });
+  }),
+);
+
+/** POST /api/admin/groups/:groupId/requests/:requestId/decide — support admission. */
+router.post(
+  "/groups/:groupId/requests/:requestId/decide",
+  writeLimiter,
+  validate({ params: adminGroupJoinRequestParamSchema, body: adminGroupJoinRequestDecisionSchema }),
+  asyncHandler(async (req, res) => {
+    const { groupId, requestId } = req.params;
+    const result = await groups.decideJoinRequest(
+      req.user.id,
+      requestId,
+      req.body.decision,
+      req.body.note,
+      { allowAdmin: true, expectedGroupId: groupId },
+    );
+
+    await recordAudit({
+      actor: actor(req),
+      req,
+      action: AUDIT.GROUP_JOIN_REQUEST_DECIDED_BY_ADMIN,
+      entityType: "study_group",
+      entityId: groupId,
+      metadata: {
+        requestId,
+        studentId: result.studentId,
+        decision: result.status,
+        note: req.body.note ?? null,
+      },
+    });
+
+    return ok(res, { ...result, admitted: result.status === "APPROVED" });
   }),
 );
 
@@ -1373,32 +1585,128 @@ router.patch(
 // AI configuration and usage
 // ---------------------------------------------------------------------------
 
+/** GET /api/admin/ai/providers — safe provider metadata and health. */
+router.get(
+  "/ai/providers",
+  searchLimiter,
+  asyncHandler(async (_req, res) => ok(res, { providers: await aiProviders.listProviders() })),
+);
+
+/** POST /api/admin/ai/providers — create an encrypted provider configuration. */
+router.post(
+  "/ai/providers",
+  writeLimiter,
+  validate({ body: aiProviderCreateSchema }),
+  asyncHandler(async (req, res) => {
+    const provider = await aiProviders.createProvider(req.body, req.user.id);
+    await recordAudit({
+      actor: actor(req), req, action: AUDIT.AI_PROVIDER_CREATED, entityType: "ai_provider", entityId: provider.id,
+      metadata: aiProviders.auditSafeProvider(provider), required: true,
+    });
+    return created(res, { provider });
+  }),
+);
+
+/** PATCH /api/admin/ai/providers/:id — edit metadata or rotate/remove credential. */
+router.patch(
+  "/ai/providers/:id",
+  writeLimiter,
+  validate({ params: aiProviderIdSchema, body: aiProviderUpdateSchema }),
+  asyncHandler(async (req, res) => {
+    const provider = await aiProviders.updateProvider(req.params.id, req.body, req.user.id);
+    await recordAudit({
+      actor: actor(req), req, action: AUDIT.AI_PROVIDER_UPDATED, entityType: "ai_provider", entityId: provider.id,
+      metadata: aiProviders.auditSafeProvider(provider), required: true,
+    });
+    return ok(res, { provider });
+  }),
+);
+
+/** DELETE /api/admin/ai/providers/:id — remove configuration, not usage history. */
+router.delete(
+  "/ai/providers/:id",
+  writeLimiter,
+  validate({ params: aiProviderIdSchema }),
+  asyncHandler(async (req, res) => {
+    const provider = await aiProviders.getProvider(req.params.id);
+    await aiProviders.removeProvider(req.params.id);
+    await recordAudit({
+      actor: actor(req), req, action: AUDIT.AI_PROVIDER_REMOVED, entityType: "ai_provider", entityId: provider.id,
+      metadata: aiProviders.auditSafeProvider(provider), required: true,
+    });
+    return ok(res, { removed: true, id: provider.id });
+  }),
+);
+
+/** POST /api/admin/ai/providers/:id/test — one-provider live connectivity test. */
+router.post(
+  "/ai/providers/:id/test",
+  writeLimiter,
+  validate({ params: aiProviderIdSchema }),
+  asyncHandler(async (req, res) => {
+    const result = await aiConfig.testSpecificProvider(req.params.id);
+    await recordAudit({
+      actor: actor(req), req, action: AUDIT.AI_PROVIDER_TESTED, entityType: "ai_provider", entityId: req.params.id,
+      metadata: { ok: result.ok, latencyMs: result.latencyMs ?? null, code: result.code ?? null },
+      outcome: result.ok ? "SUCCESS" : "FAILURE", required: true,
+    });
+    return ok(res, { result });
+  }),
+);
+
+/** POST /api/admin/ai/providers/:id/models — backend-only model discovery. */
+router.post(
+  "/ai/providers/:id/models",
+  writeLimiter,
+  validate({ params: aiProviderIdSchema }),
+  asyncHandler(async (req, res) => {
+    const result = await aiProviders.discoverModels(req.params.id);
+    await recordAudit({
+      actor: actor(req), req, action: AUDIT.AI_PROVIDER_DISCOVERY, entityType: "ai_provider", entityId: req.params.id,
+      metadata: { count: result.models.length }, required: true,
+    });
+    return ok(res, result);
+  }),
+);
+
 /** PATCH /api/admin/ai/config — runtime knobs only, never credentials. */
 router.patch(
   "/ai/config",
   writeLimiter,
-  validate({ body: aiRuntimeUpdateSchema }),
+  validate({ body: aiConfigUpdateSchema }),
   asyncHandler(async (req, res) => {
-    const current = await settings.getSection("ai.runtime");
-    const merged = { ...current, ...req.body };
+    const runtimeKeys = ["assistantEnabled", "matchingEnabled", "maxRequestsPerHour", "timeoutMs", "maxFailoverAttempts", "fallbackEnabled", "failureThreshold", "recoveryCooldownMs"];
+    const runtimePatch = Object.fromEntries(Object.entries(req.body).filter(([key]) => runtimeKeys.includes(key)));
+    const webPatch = req.body.web ?? {};
 
-    // Re-validate the merged shape; a partial patch cannot persist an invalid
-    // combination (for example a zero timeout).
-    const parsed = settingSectionSchemas["ai.runtime"].safeParse(merged);
-    if (!parsed.success) {
-      const fields = {};
-      for (const issue of parsed.error.issues) fields[issue.path.join(".") || "value"] = issue.message;
-      throw new AppError("Please check the AI settings.", { status: 422, code: "VALIDATION_FAILED", fields });
+    if (Object.keys(runtimePatch).length) {
+      const current = await settings.getSection("ai.runtime");
+      const parsed = settingSectionSchemas["ai.runtime"].safeParse({ ...current, ...runtimePatch });
+      if (!parsed.success) {
+        const fields = {};
+        for (const issue of parsed.error.issues) fields[issue.path.join(".") || "value"] = issue.message;
+        throw new AppError("Please check the AI settings.", { status: 422, code: "VALIDATION_FAILED", fields });
+      }
+      await settings.setSection("ai.runtime", parsed.data, { updatedBy: req.user.id });
     }
 
-    await settings.setSection("ai.runtime", parsed.data, { updatedBy: req.user.id });
+    if (Object.keys(webPatch).length) {
+      const current = await settings.getSection("ai.web");
+      const parsed = settingSectionSchemas["ai.web"].safeParse({ ...current, ...webPatch });
+      if (!parsed.success) {
+        const fields = {};
+        for (const issue of parsed.error.issues) fields[`web.${issue.path.join(".") || "value"}`] = issue.message;
+        throw new AppError("Please check the web research settings.", { status: 422, code: "VALIDATION_FAILED", fields });
+      }
+      await settings.setSection("ai.web", parsed.data, { updatedBy: req.user.id });
+    }
 
     await recordAudit({
       actor: actor(req),
       req,
       action: AUDIT.AI_CONFIG_UPDATED,
       entityType: "system_setting",
-      entityId: "ai.runtime",
+      entityId: Object.keys(webPatch).length ? "ai.runtime+ai.web" : "ai.runtime",
       metadata: { changes: req.body },
       required: true,
     });
@@ -1442,22 +1750,15 @@ router.post(
 router.get(
   "/ai/chain",
   asyncHandler(async (_req, res) => {
-    const circuits = getCircuitSnapshot();
-    const chain = getTargets().map((target) => ({
-      id: target.id,
-      provider: target.provider,
-      label: target.label,
-      model: target.chatModel,
-      circuit: circuits[target.id]?.state ?? "CLOSED",
-      failures: circuits[target.id]?.failures ?? 0,
-      lastFailureAt: circuits[target.id]?.lastFailureAt ?? null,
-    }));
+    const configuration = await aiConfig.aiConfiguration();
+    const chain = configuration.chain;
+    const targets = await getTargetsAsync();
+    const providers = targets.map((target) => target.provider);
 
     return ok(res, {
       chain,
-      providers: configuredKeys(),
-      embeddingModel: configuredEmbeddingModel(),
-      configured: aiStatus().configured,
+      providers: [...new Set(providers)],
+      configured: configuration.configured,
     });
   }),
 );
@@ -1469,7 +1770,7 @@ router.post(
   validate({ params: z.object({ id: z.string().trim().min(3).max(200) }) }),
   asyncHandler(async (req, res) => {
     const { id } = req.params;
-    if (!getTargets().some((target) => target.id === id)) throw new NotFoundError("That AI provider target");
+    if (!(await getTargetsAsync()).some((target) => target.id === id)) throw new NotFoundError("That AI provider target");
 
     resetCircuit(id);
 
@@ -1687,7 +1988,6 @@ router.get(
         configured: ai.configured,
         provider: ai.provider,
         model: ai.model,
-        embeddingModel: configuredEmbeddingModel(),
         chains: getCircuitSnapshot(),
       },
     });

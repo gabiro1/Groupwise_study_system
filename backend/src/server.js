@@ -14,6 +14,37 @@ import { publishDueAnnouncements } from "./services/announcement.service.js";
  * delivering the same announcement twice.
  */
 const ANNOUNCEMENT_TICK_MS = 60_000;
+const DATABASE_STARTUP_RETRY_DELAYS_MS = [0, 1_000, 2_000, 4_000, 8_000];
+
+/**
+ * A development reload can briefly race a managed Postgres connection reset.
+ * Keep the process alive while that transient condition clears instead of
+ * letting node --watch exit and leaving the frontend with repeated 503s.
+ */
+async function connectToDatabase() {
+  let lastError;
+
+  for (let index = 0; index < DATABASE_STARTUP_RETRY_DELAYS_MS.length; index += 1) {
+    const delayMs = DATABASE_STARTUP_RETRY_DELAYS_MS[index];
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+    try {
+      return await healthcheck();
+    } catch (error) {
+      lastError = error;
+      if (index < DATABASE_STARTUP_RETRY_DELAYS_MS.length - 1) {
+        logger.warn("Database is not ready; retrying startup", {
+          attempt: index + 1,
+          nextAttemptInMs: DATABASE_STARTUP_RETRY_DELAYS_MS[index + 1],
+          code: error.code,
+          message: error.message,
+        });
+      }
+    }
+  }
+
+  throw lastError;
+}
 
 /**
  * Start the in-process announcement scheduler.
@@ -68,11 +99,12 @@ const app = createApp();
 
 async function start() {
   try {
-    const db = await healthcheck();
+    const db = await connectToDatabase();
     logger.info("Database connection established", { latencyMs: db.latencyMs });
   } catch (error) {
     logger.error("Could not reach the database — refusing to start", {
       message: error.message,
+      code: error.code,
       hint: "Check DATABASE_URL and that Postgres is running.",
     });
     process.exit(1);

@@ -25,6 +25,7 @@ import notificationsRoutes from "../routes/notifications.routes.js";
 import adminRoutes, { reportRouter } from "../routes/admin.routes.js";
 import adminManagementRoutes from "../routes/adminManagement.routes.js";
 import adminConsoleRoutes from "../routes/adminConsole.routes.js";
+import adminRecommendationRoutes from "../routes/adminRecommendation.routes.js";
 import researchRoutes from "../routes/research.routes.js";
 import contactRoutes from "../routes/contact.routes.js";
 
@@ -170,6 +171,7 @@ export function createApp() {
   // mounted first so its specific child paths resolve before the older routers,
   // which intentionally keep their original list/moderation endpoints.
   app.use("/api/admin", adminConsoleRoutes);
+  app.use("/api/admin", adminRecommendationRoutes);
   // The management surface (group leaders, workspaces, sessions, analytics, AI
   // config, announcements) is mounted first so its specific paths resolve before
   // the older admin router's catch-alls.

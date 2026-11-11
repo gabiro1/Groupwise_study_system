@@ -62,7 +62,7 @@ async function assertRecipientReachable(requesterId, recipientId) {
 }
 
 /** Send a study-partner invitation. */
-export async function createInvitation(requesterId, { recipientId, message }) {
+export async function createInvitation(requesterId, { recipientId, message, recommendationId }) {
   if (recipientId === requesterId) {
     throw new AppError("You cannot invite yourself to be a study partner.", {
       status: 422,
@@ -71,6 +71,10 @@ export async function createInvitation(requesterId, { recipientId, message }) {
   }
 
   await assertRecipientReachable(requesterId, recipientId);
+
+  const attributedRecommendationId = recommendationId
+    ? await validatePartnerRecommendation(recommendationId, requesterId, recipientId)
+    : null;
 
   const existing = await queryOne(
     `SELECT pc.id, pc.status, pc.requester_id, pc.recipient_id
@@ -112,10 +116,10 @@ export async function createInvitation(requesterId, { recipientId, message }) {
   }
 
   const invitation = await queryOne(
-    `INSERT INTO partner_connections (requester_id, recipient_id, status, message)
-     VALUES ($1, $2, 'PENDING', $3)
-     RETURNING id, requester_id, recipient_id, status, message, requested_at`,
-    [requesterId, recipientId, message?.trim() || null],
+    `INSERT INTO partner_connections (requester_id, recipient_id, status, message, recommendation_id)
+      VALUES ($1, $2, 'PENDING', $3, $4)
+      RETURNING id, requester_id, recipient_id, status, message, recommendation_id, requested_at`,
+    [requesterId, recipientId, message?.trim() || null, attributedRecommendationId],
     "partners:create",
   );
 
@@ -184,7 +188,7 @@ export async function listInvitations(userId) {
  */
 export async function respondToInvitation(userId, invitationId, response) {
   const invitation = await queryOne(
-    `SELECT pc.id, pc.status, pc.requester_id, pc.recipient_id
+    `SELECT pc.id, pc.status, pc.requester_id, pc.recipient_id, pc.recommendation_id
        FROM partner_connections pc
       WHERE pc.id = $1 AND pc.recipient_id = $2`,
     [invitationId, userId],
@@ -203,7 +207,7 @@ export async function respondToInvitation(userId, invitationId, response) {
         `UPDATE partner_connections
             SET status = 'ACCEPTED', responded_at = now()
           WHERE id = $1 AND status = 'PENDING'
-          RETURNING id, requester_id, recipient_id, status`,
+          RETURNING id, requester_id, recipient_id, recommendation_id, status`,
         [invitationId],
         "partners:accept",
       );
@@ -221,6 +225,15 @@ export async function respondToInvitation(userId, invitationId, response) {
         [conversation.id, updated.requester_id, updated.recipient_id],
         "partners:addMembers",
       );
+      if (updated.recommendation_id) {
+        await tx.query(
+          `UPDATE recommendations
+              SET accepted_at = COALESCE(accepted_at, now())
+            WHERE id = $1 AND student_id = $2 AND kind = 'STUDENT' AND target_student_id = $3`,
+          [updated.recommendation_id, updated.requester_id, updated.recipient_id],
+          "partners:recordRecommendationAcceptance",
+        );
+      }
       return { ...updated, conversationId: conversation.id };
     }, "partners:acceptTransaction");
 
@@ -241,13 +254,35 @@ export async function respondToInvitation(userId, invitationId, response) {
   const declined = await queryOne(
     `UPDATE partner_connections SET status = 'DECLINED', responded_at = now()
       WHERE id = $1 AND status = 'PENDING'
-      RETURNING id, status, requester_id, recipient_id`,
+       RETURNING id, status, requester_id, recipient_id, recommendation_id`,
     [invitationId],
     "partners:decline",
   );
   if (!declined) throw new ConflictError("That partner request has already been answered.");
 
+  if (declined.recommendation_id) {
+    await query(
+      `UPDATE recommendations
+          SET rejected_at = COALESCE(rejected_at, now()), dismissed_reason = 'NOT_INTERESTED'
+        WHERE id = $1 AND student_id = $2 AND kind = 'STUDENT' AND target_student_id = $3`,
+      [declined.recommendation_id, declined.requester_id, declined.recipient_id],
+      "partners:recordRecommendationRejection",
+    );
+  }
+
   return { connection: declined, conversationId: null };
+}
+
+async function validatePartnerRecommendation(recommendationId, requesterId, recipientId) {
+  const row = await queryOne(
+    `SELECT id
+       FROM recommendations
+      WHERE id = $1 AND student_id = $2 AND kind = 'STUDENT' AND target_student_id = $3`,
+    [recommendationId, requesterId, recipientId],
+    "partners:validateRecommendationAttribution",
+  );
+  if (!row) throw new NotFoundError("That recommendation");
+  return row.id;
 }
 
 /** Revoke an outbound invitation that is still pending. */

@@ -1,4 +1,4 @@
-import { query, queryRows, queryOne, withTransaction } from "../config/db.js";
+import { query, queryRows, queryOne } from "../config/db.js";
 import { NotFoundError, AppError, ConflictError, ServiceUnavailableError } from "../lib/errors.js";
 import {
   availabilityCompatibility,
@@ -12,9 +12,26 @@ import {
   dataConfidence,
   preferenceTextSimilarity,
 } from "../lib/features.js";
-import { computeCompatibility, buildExplanation, strengthLabel, calibrate } from "../lib/scoring.js";
+import { computeCompatibility, buildExplanation, strengthLabel } from "../lib/scoring.js";
 import { DEFAULT_WEIGHTS, MODEL_VERSION, MODEL_METADATA, validateWeights } from "../lib/weights.js";
 import { LEARNING_GOAL_LABELS, GROUP_SIZE, STUDY_MODES } from "../config/constants.js";
+import {
+  RECOMMENDATION_FEATURE_SCHEMA_VERSION,
+  buildRecommendationFeatureVector,
+} from "../lib/recommendation-feature-schema.js";
+import {
+  getDataReadiness,
+  getActiveModelArtifact,
+  getRecommendationRuntime,
+  selectRecommendationModel,
+  predictRecommendationScores,
+} from "./recommendation-model.service.js";
+import {
+  loadPersonalizationState,
+  invalidatePersonalization,
+  boundedPersonalizationAdjustment,
+  publicPersonalizationState,
+} from "./recommendation-personalization.service.js";
 
 /**
  * Recommendation service.
@@ -38,6 +55,20 @@ const MINIMUM_SCORE = 40;
 
 /** Below this confidence, the result is returned but flagged as provisional. */
 const LOW_CONFIDENCE_FLOOR = 0.4;
+
+const clampScore = (value) => Math.round(Math.min(100, Math.max(0, Number(value) || 0)) * 10) / 10;
+
+function normalizeModelScores(entries, scores) {
+  const values = entries.map((entry) => scores.get(String(entry.candidate.id))).filter(Number.isFinite);
+  if (!values.length) return new Map();
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (max === min) return new Map(entries.map((entry) => [String(entry.candidate.id), 50]));
+  return new Map(entries.map((entry) => {
+    const raw = scores.get(String(entry.candidate.id));
+    return [String(entry.candidate.id), Number.isFinite(raw) ? ((raw - min) / (max - min)) * 100 : entry.score];
+  }));
+}
 
 /**
  * Ensure the active model version row exists, seeded from the code constants.
@@ -106,8 +137,106 @@ export async function generate(studentId, input) {
   const candidates =
     input.kind === "GROUP" ? await loadGroupCandidates(requirements, input) : await loadStudentCandidates(requirements, input);
 
-  const scored = candidates
+  const [dataReadiness, artifact, runtime, personalizationProfile] = await Promise.all([
+    getDataReadiness(),
+    getActiveModelArtifact(),
+    getRecommendationRuntime(),
+    loadPersonalizationState(studentId),
+  ]);
+  requirements.personalization = personalizationProfile;
+
+  // The weighted scorer is always calculated first. Besides preserving the
+  // existing minimum-score safety gate, this gives every learned result an
+  // auditable baseline score and deterministic explanation.
+  const baselineEntries = candidates
     .map((candidate) => scoreRecommendationCandidate(requirements, candidate, model.weights, input))
+    .filter((entry) => entry.score >= MINIMUM_SCORE)
+    ;
+
+  let selection = selectRecommendationModel({
+    student: studentId,
+    request: input,
+    candidateCount: baselineEntries.length,
+    dataReadiness,
+    personalizationState: publicPersonalizationState(personalizationProfile, {
+      enabled: runtime.personalizationEnabled,
+      minEvents: runtime.minPersonalizationEvents,
+    }),
+    artifact,
+    runtime,
+    baselineModelVersion: model.id,
+  });
+
+  let modelScores = null;
+  if (selection.algorithm.startsWith("LEARNING_TO_RANK")) {
+    try {
+      modelScores = await predictRecommendationScores({ selection, candidates: baselineEntries });
+    } catch (error) {
+      // A model-serving failure is an operational signal, not a student-facing
+      // error. Re-select the weighted path while retaining the readiness state.
+      const fallback = selectRecommendationModel({
+        student: studentId,
+        request: input,
+        candidateCount: baselineEntries.length,
+        dataReadiness,
+        personalizationState: publicPersonalizationState(personalizationProfile, {
+          enabled: runtime.personalizationEnabled,
+          minEvents: runtime.minPersonalizationEvents,
+        }),
+        artifact: null,
+        runtime: { ...runtime, algorithm: "WEIGHTED_SCORING" },
+        baselineModelVersion: model.id,
+      });
+      selection = {
+        ...fallback,
+        degraded: true,
+        fallbackReason: error.message,
+        trainingDataReady: Boolean(dataReadiness.ready),
+        failedModelVersion: selection.modelVersion,
+      };
+    }
+  }
+
+  const normalizedModelScores = modelScores ? normalizeModelScores(baselineEntries, modelScores) : null;
+  const personalizationState = publicPersonalizationState(personalizationProfile, {
+    enabled: selection.personalized,
+    minEvents: runtime.minPersonalizationEvents,
+  });
+  const scored = baselineEntries
+    .map((entry) => {
+      const baselineScore = entry.score;
+      // The ranker's output is used only to rerank candidates that already pass
+      // the deterministic service-layer gate. Public scores remain bounded and
+      // personalization can move them only by the configured maximum.
+      const rankedScore = normalizedModelScores?.get(String(entry.candidate.id)) ?? baselineScore;
+      const adjustment = selection.personalized
+        ? boundedPersonalizationAdjustment(personalizationProfile, entry.featureValues, {
+            maxPoints: runtime.maxPersonalizationAdjustment,
+            minEvents: runtime.minPersonalizationEvents,
+          })
+        : 0;
+      const explanation = selection.personalized && Math.abs(adjustment) >= 0.05
+        ? [
+            ...entry.explanation,
+            {
+              type: "PERSONALIZATION",
+              detail: "Personalized from your previous recommendation feedback.",
+              weight: 0,
+              impact: "low",
+            },
+          ]
+        : entry.explanation;
+
+      return {
+        ...entry,
+        baselineScore,
+        score: clampScore(rankedScore + adjustment),
+        personalizationAdjustment: Math.round(adjustment * 100) / 100,
+        explanation,
+      };
+    })
+    // Learned scores may rerank a safe candidate but may not bypass the same
+    // deterministic publication floor used by the weighted baseline.
     .filter((entry) => entry.score >= MINIMUM_SCORE)
     // Score is primary; the id tie-breaker keeps equal rounded scores stable.
     .sort((a, b) => b.score - a.score || String(a.candidate.id).localeCompare(String(b.candidate.id)))
@@ -120,14 +249,23 @@ export async function generate(studentId, input) {
   if (input.track !== false) {
     const request = await queryOne(
       `INSERT INTO recommendation_requests
-         (student_id, kind, model_version_id, goal_id, course_id, requirements, source,
-          natural_language, parsed_intent, candidate_pool_size, result_count, latency_ms, degraded)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-       RETURNING id`,
+          (student_id, kind, model_version_id, serving_model_version, algorithm,
+           feature_schema_version, personalized, training_data_ready, model_degraded,
+           fallback_reason, goal_id, course_id, requirements, source, natural_language,
+           parsed_intent, candidate_pool_size, result_count, latency_ms, degraded)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+        RETURNING id`,
       [
         studentId,
         input.kind,
         model.id,
+        selection.modelVersion,
+        selection.algorithm,
+        selection.featureSchemaVersion,
+        selection.personalized,
+        selection.trainingDataReady,
+        selection.degraded,
+        selection.fallbackReason,
         input.goalId ?? null,
         input.courseId ?? null,
         JSON.stringify({
@@ -143,7 +281,7 @@ export async function generate(studentId, input) {
         candidates.length,
         scored.length,
         null,
-        input.degraded ?? false,
+        Boolean(input.degraded || selection.degraded),
       ],
       "recs:createRequest",
     );
@@ -154,11 +292,11 @@ export async function generate(studentId, input) {
       // each, this endpoint would otherwise spend most of its latency waiting on
       // the database.
       //
-      // Every row has the same 14 columns, so the value array and the placeholder
+      // Every row has the same 18 bound values, so the value array and the placeholder
       // count are derived from one constant — if they drift apart, Postgres
       // reports a parameter count mismatch immediately rather than silently
       // binding the wrong values to the wrong columns.
-      const COLUMNS_PER_ROW = 14;
+      const COLUMNS_PER_ROW = 18;
       const isGroup = input.kind === "GROUP";
 
       const values = [];
@@ -168,10 +306,11 @@ export async function generate(studentId, input) {
           requestId,
           studentId,
           input.kind,
-          // Exactly one target is set; the table's CHECK constraint enforces it.
-          isGroup ? null : entry.candidate.id,
-          isGroup ? entry.candidate.workspace_id : null,
-          index + 1,
+           // Exactly one target is set; the table's CHECK constraint enforces it.
+           isGroup ? null : entry.candidate.id,
+           isGroup ? entry.candidate.workspace_id : null,
+           isGroup ? entry.candidate.id : null,
+           index + 1,
           entry.score,
           JSON.stringify(entry.breakdown),
           entry.similarity,
@@ -180,17 +319,25 @@ export async function generate(studentId, input) {
           entry.overlappingTopics,
           JSON.stringify(entry.explanation),
           entry.confidence,
+          entry.baselineScore,
+          entry.personalizationAdjustment,
+          JSON.stringify(entry.featureValues),
         );
         return `(${Array.from({ length: COLUMNS_PER_ROW }, (_, i) => `$${base + i + 1}`).join(", ")})`;
       });
+      const valuesSql = placeholders.join(", ");
 
+      const insertSql = [
+        "INSERT INTO recommendations",
+        "  (request_id, student_id, kind, target_student_id, target_workspace_id, target_group_id, rank, score,",
+        "   score_breakdown, similarity_score, complementarity_score, complementary_topics,",
+        "   overlapping_topics, explanation, confidence, baseline_score,",
+        "   personalization_adjustment, feature_values)",
+        "VALUES " + valuesSql,
+        "RETURNING id, rank",
+      ].join("\n");
       const stored = await query(
-        `INSERT INTO recommendations
-           (request_id, student_id, kind, target_student_id, target_workspace_id, rank, score,
-            score_breakdown, similarity_score, complementarity_score,
-            complementary_topics, overlapping_topics, explanation, confidence)
-         VALUES ${placeholders.join(", ")}
-         RETURNING id, rank`,
+        insertSql,
         values,
         "recs:storeResults",
       );
@@ -200,14 +347,24 @@ export async function generate(studentId, input) {
 
   return {
     requestId,
-    modelVersion: model.id,
-    degraded: Boolean(input.degraded),
+    algorithm: selection.algorithm,
+    modelVersion: selection.modelVersion,
+    degraded: Boolean(input.degraded || selection.degraded),
+    personalized: selection.personalized,
+    trainingDataReady: Boolean(selection.trainingDataReady),
+    personalization: personalizationState,
     candidatesConsidered: candidates.length,
     results: scored.map((entry, index) => ({
       rank: index + 1,
       recommendationId: recommendationIds.get(index + 1) ?? null,
       ...entry.payload,
+      algorithm: selection.algorithm,
+      modelVersion: selection.modelVersion,
+      degraded: Boolean(input.degraded || selection.degraded),
+      personalized: selection.personalized,
+      trainingDataReady: Boolean(selection.trainingDataReady),
       score: entry.score,
+      baselineScore: entry.baselineScore,
       label: strengthLabel(entry.score),
       similarity: entry.similarity,
       complementarity: entry.complementarity,
@@ -258,6 +415,7 @@ async function resolveRequirements(studentId, input) {
       partner_preferences: profile?.preferences?.partner_preferences ?? null,
     },
     programmeId: profile?.programmeId ?? null,
+    profileFieldCount: profile?.profileFieldCount ?? 0,
     confidence: dataConfidence({
       courses: [...courseIds],
       topics: [...topicIds].length ? [...topicIds] : [...(profile?.topics?.keys() ?? [])],
@@ -325,6 +483,15 @@ async function loadStudentProfile(studentId) {
     skills: new Map(skills.map((skill) => [skill.skill_id, skill])),
     availability,
     preferences: preferences ?? {},
+    profileFieldCount: [
+      row?.program_id,
+      courses.length ? courses : null,
+      topics.length >= 2 ? topics : null,
+      skills.length >= 2 ? skills : null,
+      goal?.id,
+      availability.length ? availability : null,
+      preferences,
+    ].filter(Boolean).length,
   };
 }
 
@@ -378,16 +545,20 @@ async function loadGroupCandidates(requirements, input) {
             (SELECT max(created_at) FROM group_activity_events e WHERE e.group_id = g.id) AS last_event_at
        FROM study_groups g
        JOIN courses c ON c.id = g.course_id
-       LEFT JOIN learning_goals lg ON lg.id = g.goal_id
-       LEFT JOIN LATERAL (
-         SELECT id FROM workspaces
-          WHERE group_id = g.id AND NOT is_archived
-          ORDER BY created_at DESC
-          LIMIT 1
-       ) w ON TRUE
-      WHERE ${clauses.join(" AND ")} AND w.id IS NOT NULL
-      ORDER BY g.activity_score DESC, g.created_at DESC
-      LIMIT 200`,
+         LEFT JOIN learning_goals lg ON lg.id = g.goal_id
+         LEFT JOIN LATERAL (
+          SELECT w.id, w.created_at AS workspace_created_at FROM workspaces w
+           WHERE NOT w.is_archived
+             AND (w.group_id = g.id OR EXISTS (
+               SELECT 1 FROM workspace_groups wg
+                WHERE wg.workspace_id = w.id AND wg.group_id = g.id
+             ))
+           ORDER BY w.created_at DESC
+           LIMIT 1
+         ) w ON TRUE
+       WHERE ${clauses.join(" AND ")} AND w.id IS NOT NULL
+       ORDER BY g.activity_score DESC, g.created_at DESC
+       LIMIT 200`,
     params,
     "recs:groupCandidates",
   );
@@ -494,8 +665,9 @@ async function loadStudentCandidates(requirements, input) {
        JOIN student_profiles sp ON sp.user_id = u.id
        LEFT JOIN privacy_settings ps ON ps.user_id = u.id
        LEFT JOIN study_preferences pref ON pref.student_id = u.id
-      WHERE ${clauses.join(" AND ")}
-      LIMIT 200`,
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY u.id
+       LIMIT 200`,
     params,
     "recs:studentCandidates",
   );
@@ -593,25 +765,33 @@ export function scoreRecommendationCandidate(requirements, candidate, weights, i
     max_group_size: candidate.max_size ?? candidate.max_group_size,
     session_minutes: candidate.session_minutes,
   });
+  const course = courseCompatibility(
+    sharedCourses,
+    Boolean(candidate.program_id && candidate.program_id === requirements.programmeId),
+  );
+  const goals = goalCompatibility(requirements.goalCode, candidate.goalCode ?? candidate.goal_code);
+  const topics = topicSimilarity(requirements.topics, candidate.topics);
+  const groupSize = groupSizeCompatibility(requirements.preferences, candidate.member_count, candidate.max_size);
+  const activity = candidate.activity_score !== undefined
+    ? activityCompatibility(
+        { recentScore: 0.6 },
+        { activityScore: Number(candidate.activity_score ?? 0), daysSinceLastEvent: candidate.daysSinceLastEvent },
+      )
+    : undefined;
 
   const result = computeCompatibility({
-    course: courseCompatibility(sharedCourses, Boolean(candidate.program_id && candidate.program_id === requirements.programmeId)),
+    course,
     skills: complementarity.score,
-    goals: goalCompatibility(requirements.goalCode, candidate.goalCode ?? candidate.goal_code),
+    goals,
     availability: availability.score,
     preferences: preferences.score,
-    topics: topicSimilarity(requirements.topics, candidate.topics),
+    topics,
     preferenceText: preferenceTextSimilarity(
       requirements.preferences.partner_preferences,
       candidate.partner_preferences,
     ) ?? undefined,
-    groupSize: groupSizeCompatibility(requirements.preferences, candidate.member_count, candidate.max_size),
-    activity: candidate.activity_score !== undefined
-      ? activityCompatibility(
-          { recentScore: 0.6 },
-          { activityScore: Number(candidate.activity_score ?? 0), daysSinceLastEvent: candidate.daysSinceLastEvent },
-        )
-      : undefined,
+    groupSize,
+    activity,
     confidence: requirements.confidence,
     weights,
   });
@@ -629,6 +809,27 @@ export function scoreRecommendationCandidate(requirements, candidate, weights, i
       requirements.preferences.max_group_size >= candidate.max_size,
     groupSizeText: `you prefer up to ${requirements.preferences.max_group_size}, this group allows ${candidate.max_size}`,
   });
+  const featureValues = buildRecommendationFeatureVector({
+    sharedCourses,
+    sameProgramme: Boolean(candidate.program_id && candidate.program_id === requirements.programmeId),
+    courseCompatibility: course,
+    skillComplementarity: complementarity.score,
+    topicSimilarity: topics,
+    goalCompatibility: goals,
+    availabilityOverlap: availability.score,
+    preferences,
+    groupSizeCompatibility: groupSize,
+    activityCompatibility: activity,
+    candidateActivityScore: Number.isFinite(Number(candidate.activity_score)) ? Number(candidate.activity_score) : undefined,
+    daysSinceLastEvent: candidate.daysSinceLastEvent,
+    memberCount: candidate.member_count,
+    maxSize: candidate.max_size,
+    ageDays: candidate.age_days,
+    profileConfidence: requirements.confidence,
+    profileFieldsCompleted: (requirements.profileFieldCount ?? 0) / 7,
+    isGroup: candidate.name !== undefined,
+    personalization: requirements.personalization,
+  });
 
   return {
     score: result.score,
@@ -639,6 +840,8 @@ export function scoreRecommendationCandidate(requirements, candidate, weights, i
     overlappingTopics: complementarity.overlapping,
     explanation,
     confidence: result.confidence / 100,
+    featureSchemaVersion: RECOMMENDATION_FEATURE_SCHEMA_VERSION,
+    featureValues,
     candidate,
     payload:
       candidate.name !== undefined
@@ -764,8 +967,10 @@ export async function recordOutcome(studentId, recommendationId, action, { reaso
     throw new ConflictError("That recommendation already has a final outcome.", { code: "OUTCOME_FINAL" });
   }
 
+  const exposureAssignment = column === "shown_at" ? "" : "shown_at = COALESCE(shown_at, now()),";
   const row = await queryOne(
-    `UPDATE recommendations SET ${column} = COALESCE(${column}, now()),
+    `UPDATE recommendations SET ${exposureAssignment}
+            ${column} = COALESCE(${column}, now()),
             dismissed_reason = CASE WHEN $4 = 'REJECTED' THEN $3 ELSE dismissed_reason END
       WHERE id = $1 AND student_id = $2 AND accepted_at IS NULL AND rejected_at IS NULL
       RETURNING id, kind, target_student_id, target_workspace_id, request_id`,
@@ -774,6 +979,8 @@ export async function recordOutcome(studentId, recommendationId, action, { reaso
   );
 
   if (!row) throw new ConflictError("That recommendation already has a final outcome.", { code: "OUTCOME_FINAL" });
+
+  if (action !== "SHOWN") invalidatePersonalization(studentId);
 
   // Accepting a *group* recommendation should not silently join the group: that is
   // a separate, reversible action the student takes deliberately. Only a student
@@ -839,6 +1046,8 @@ export async function recordFeedback(studentId, recommendationId, { helpful, rea
     "recs:recordFeedback",
   );
 
+  invalidatePersonalization(studentId);
+
   return { saved: true, feedback: row };
 }
 
@@ -851,18 +1060,21 @@ export async function recordFeedback(studentId, recommendationId, { helpful, rea
  */
 export async function recommendationDetail(studentId, recommendationId) {
   const row = await queryOne(
-    `SELECT r.id, r.kind, r.score, r.rank, r.confidence, r.score_breakdown, r.explanation,
-            r.similarity_score, r.complementarity_score,
-            r.complementary_topics, r.overlapping_topics,
+    `SELECT r.id, r.kind, r.score, r.rank, r.confidence, r.baseline_score,
+             r.personalization_adjustment, r.score_breakdown, r.explanation,
+             r.similarity_score, r.complementarity_score,
+             r.complementary_topics, r.overlapping_topics,
             r.shown_at, r.clicked_at, r.accepted_at, r.rejected_at, r.dismissed_reason,
-            req.created_at, r.target_student_id, r.target_workspace_id,
+             req.created_at, req.algorithm, req.serving_model_version,
+             req.personalized, req.training_data_ready, req.model_degraded,
+             r.target_student_id, r.target_workspace_id, r.target_group_id,
             u.first_name, u.last_name, u.avatar_url,
             g.id AS group_id, g.name AS group_name, g.slug
        FROM recommendations r
        JOIN recommendation_requests req ON req.id = r.request_id
        LEFT JOIN users u ON u.id = r.target_student_id
        LEFT JOIN workspaces w ON w.id = r.target_workspace_id
-       LEFT JOIN study_groups g ON g.id = w.group_id
+        LEFT JOIN study_groups g ON g.id = COALESCE(r.target_group_id, w.group_id)
       WHERE r.id = $1 AND r.student_id = $2`,
     [recommendationId, studentId],
     "recs:detail",
@@ -885,7 +1097,14 @@ export async function recommendationDetail(studentId, recommendationId) {
       id: row.id,
       kind: row.kind,
       score: row.score,
+      baselineScore: row.baseline_score,
+      personalizationAdjustment: row.personalization_adjustment,
       rank: row.rank,
+      algorithm: row.algorithm,
+      modelVersion: row.serving_model_version,
+      personalized: row.personalized,
+      trainingDataReady: row.training_data_ready,
+      degraded: row.model_degraded,
       label: strengthLabel(row.score),
       confidence: row.confidence,
       breakdown: row.score_breakdown,
@@ -912,8 +1131,11 @@ export async function recommendationDetail(studentId, recommendationId) {
 /** Previous recommendations for the caller, for the "you might also like" strip. */
 export async function listRecent(studentId, limit = 10) {
   return queryRows(
-    `SELECT r.id, r.kind, r.score, r.rank, r.accepted_at, r.rejected_at, r.shown_at,
-            r.target_student_id, r.target_workspace_id,
+    `SELECT r.id, r.kind, r.score, r.rank, r.baseline_score, r.personalization_adjustment,
+            r.accepted_at, r.rejected_at, r.shown_at,
+            req.algorithm, req.serving_model_version AS model_version,
+            req.personalized, req.model_degraded AS degraded,
+             r.target_student_id, r.target_workspace_id, r.target_group_id,
             req.created_at,
             u.first_name, u.last_name,
             g.name AS group_name, g.slug
@@ -921,12 +1143,26 @@ export async function listRecent(studentId, limit = 10) {
        JOIN recommendation_requests req ON req.id = r.request_id
        LEFT JOIN users u ON u.id = r.target_student_id
        LEFT JOIN workspaces w ON w.id = r.target_workspace_id
-       LEFT JOIN study_groups g ON g.id = w.group_id
+        LEFT JOIN study_groups g ON g.id = COALESCE(r.target_group_id, w.group_id)
       WHERE r.student_id = $1
       ORDER BY req.created_at DESC LIMIT $2`,
     [studentId, limit],
     "recs:listRecent",
   );
+}
+
+/** Read-only state for the signed-in student; no behavioral details are exposed. */
+export async function personalizationStatus(studentId) {
+  const [runtime, profile] = await Promise.all([
+    getRecommendationRuntime(),
+    loadPersonalizationState(studentId),
+  ]);
+  return {
+    personalization: publicPersonalizationState(profile, {
+      enabled: runtime.personalizationEnabled,
+      minEvents: runtime.minPersonalizationEvents,
+    }),
+  };
 }
 
 /**
@@ -976,9 +1212,38 @@ export async function updateWeights(actorId, weights) {
 /** Active configuration, for display on the research and admin screens. */
 export async function currentModel() {
   const model = await ensureModelVersion();
+  const [runtime, dataReadiness, artifact] = await Promise.all([
+    getRecommendationRuntime(),
+    getDataReadiness(),
+    getActiveModelArtifact(),
+  ]);
+  const selection = selectRecommendationModel({
+    candidateCount: 1,
+    dataReadiness,
+    personalizationState: { eligible: false },
+    artifact,
+    runtime,
+    baselineModelVersion: model.id,
+  });
+  const activeArtifact = artifact
+    ? {
+        modelVersion: artifact.model_version,
+        algorithm: artifact.algorithm,
+        featureSchemaVersion: artifact.feature_schema_version,
+        status: artifact.status,
+        activatedAt: artifact.activated_at,
+      }
+    : null;
   return {
     id: model.id,
-    algorithm: MODEL_METADATA.algorithm ?? "WEIGHTED_SCORING",
+    algorithm: selection.algorithm,
+    modelVersion: selection.modelVersion,
+    degraded: selection.degraded,
+    trainingDataReady: selection.trainingDataReady,
+    fallbackReason: selection.fallbackReason,
+    runtime,
+    readiness: dataReadiness,
+    activeArtifact,
     description: MODEL_METADATA.description,
     weights: model.weights,
     // Published so the UI can show students what the percentage is made of.
@@ -995,6 +1260,7 @@ export default {
   recordOutcome,
   recordFeedback,
   listRecent,
+  personalizationStatus,
   parseIntent,
   updateWeights,
   currentModel,

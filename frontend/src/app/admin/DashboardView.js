@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { apiRequest, relativeTime } from "./adminApi";
 import PageHeading from "./PageHeading";
 import MetricCard from "./MetricCard";
@@ -13,13 +14,10 @@ import MatchingPerformanceCard from "./MatchingPerformanceCard";
 import RecentReportsTable from "./RecentReportsTable";
 import {
   AlertTriangleIcon,
-  CalendarIcon,
+  InboxIcon,
   LayersIcon,
-  NetworkIcon,
   UsersIcon,
   UserCheckIcon,
-  UserMinusIcon,
-  InboxIcon,
 } from "./AdminIcons";
 
 export default function DashboardView() {
@@ -86,12 +84,15 @@ export default function DashboardView() {
   const metricCards = [
     { key: "students", label: "Total students", value: metrics?.totalStudents, icon: UsersIcon, tone: "blue", href: "/admin/users?role=STUDENT" },
     { key: "active", label: "Active accounts", value: metrics?.activeAccounts, icon: UserCheckIcon, tone: "green", href: "/admin/users?status=ACTIVE" },
-    { key: "suspended", label: "Suspended accounts", value: metrics?.suspendedAccounts, icon: UserMinusIcon, tone: "red", href: "/admin/users?status=SUSPENDED" },
-    { key: "groups", label: "Total study groups", value: metrics?.totalGroups, icon: NetworkIcon, tone: "violet", href: "/admin/groups" },
     { key: "activeGroups", label: "Active study groups", value: metrics?.activeGroups, icon: LayersIcon, tone: "teal", href: "/admin/groups?status=ACTIVE" },
-    { key: "memberships", label: "Group memberships", value: metrics?.totalMemberships, icon: InboxIcon, tone: "blue" },
     { key: "reports", label: "Pending reports", value: metrics?.pendingReports, icon: AlertTriangleIcon, tone: "orange", href: "/admin/reports" },
-    { key: "sessions", label: "Sessions this month", value: metrics?.sessionsThisMonth, icon: CalendarIcon, tone: "violet" },
+  ];
+
+  const quickAccess = [
+    { href: "/admin/users", label: "Manage users", description: "Search accounts and roles.", icon: UsersIcon, tone: "blue" },
+    { href: "/admin/groups", label: "Review groups", description: "Monitor groups and admissions.", icon: LayersIcon, tone: "teal" },
+    { href: "/admin/requests", label: "Catalogue requests", description: "Review course and topic requests.", icon: InboxIcon, tone: "violet" },
+    { href: "/admin/reports", label: "Moderation", description: "Handle reports needing attention.", icon: AlertTriangleIcon, tone: "orange" },
   ];
 
   return (
@@ -123,6 +124,28 @@ export default function DashboardView() {
           />
         ))}
       </div>
+
+      <section className="admin-card admin-quick-access" aria-labelledby="quick-access-heading">
+        <header className="admin-card-head">
+          <div>
+            <h2 id="quick-access-heading">Quick access</h2>
+            <p>Jump straight to the admin areas you use most.</p>
+          </div>
+        </header>
+        <div className="admin-quick-access-grid">
+          {quickAccess.map(({ href, label, description, icon: Icon, tone }) => (
+            <Link className="admin-quick-access-link" href={href} key={href}>
+              <span className={`admin-quick-access-icon admin-tone-${tone}`} aria-hidden="true">
+                <Icon size={17} />
+              </span>
+              <span className="admin-quick-access-copy">
+                <strong>{label}</strong>
+                <small>{description}</small>
+              </span>
+            </Link>
+          ))}
+        </div>
+      </section>
 
       <div className="admin-grid admin-grid-analytics">
         <ActivityOverviewChart

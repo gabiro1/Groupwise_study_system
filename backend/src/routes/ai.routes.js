@@ -3,15 +3,19 @@ import { asyncHandler, ok, created } from "../lib/http.js";
 import { validate } from "../middleware/validate.js";
 import { requireStudent, requireAuth } from "../middleware/auth.js";
 import { aiLimiter } from "../middleware/rateLimit.js";
-import env from "../config/env.js";
 import logger from "../config/logger.js";
 import { queryRows, queryOne } from "../config/db.js";
 import { NotFoundError } from "../lib/errors.js";
 import { assertWorkspaceAccess } from "../services/workspace.service.js";
 import { aiStatus, parseNaturalLanguage } from "../services/ai.service.js";
 import { aiRuntime } from "../services/settings.service.js";
-import { recordAiUsage } from "../services/aiConfig.service.js";
+import { recordAiUsage, recordWebSearchAudit } from "../services/aiConfig.service.js";
 import { callProvider } from "../modules/ai/orchestration.js";
+import { getTargetsAsync } from "../modules/ai/registry.js";
+import { answerFromGrounding, buildLocalSources } from "../modules/ai/grounding.js";
+import { getWebSearchPolicy, shouldSearchAutomatically } from "../modules/web-search/policies.js";
+import { getSearchProviderStatus } from "../modules/web-search/registry.js";
+import { searchWeb, hashSearchQuery } from "../modules/web-search/provider.js";
 import {
   listConversations,
   createConversation,
@@ -67,10 +71,13 @@ async function measured(feature, actorId, fn) {
     const result = await fn();
     await recordAiUsage({
       feature,
-      status: "SUCCESS",
+      status: result?.citationInvalid ? "FAILURE" : "SUCCESS",
       provider: result?.provider ?? null,
       model: result?.model ?? result?.parserModel ?? null,
       latencyMs: Date.now() - startedAt,
+      ...(result?.citationInvalid ? { errorCode: "AI_CITATION_INVALID" } : {}),
+      failoverCount: result?.failoverCount ?? 0,
+      usage: result?.usage ?? null,
       actorId,
     });
     return result;
@@ -91,7 +98,9 @@ router.get(
   "/status",
   asyncHandler(async (_req, res) => {
     const runtime = await aiRuntime();
-    const providerReady = env.aiEnabled;
+    const webPolicy = await getWebSearchPolicy();
+    const webProvider = getSearchProviderStatus();
+    const providerReady = (await getTargetsAsync()).length > 0;
 
     // Capabilities reflect *both* provider readiness and the administrator's
     // runtime switches: turning the assistant off in the console must hide it
@@ -105,7 +114,20 @@ router.get(
       capabilities: {
         intentParsing: providerReady && runtime.matchingEnabled,
         groundedAnswers: providerReady && runtime.assistantEnabled,
-        embeddings: providerReady && runtime.matchingEnabled,
+        localAssistant: providerReady && runtime.assistantEnabled,
+        webResearch: providerReady && runtime.assistantEnabled && webPolicy.enabled && webProvider.configured,
+        hybridAssistant: providerReady && runtime.assistantEnabled && webPolicy.enabled && webProvider.configured,
+        citations: providerReady && runtime.assistantEnabled,
+      },
+      webSearch: {
+        enabled: webPolicy.enabled,
+        provider: webProvider.provider,
+        configured: webProvider.configured,
+        fallbacks: webProvider.fallbacks,
+        allowlistConfigured: webPolicy.allowlist.length > 0,
+        safeSearch: webPolicy.safeSearch,
+        maxResults: webPolicy.maxResults,
+        defaultMode: webPolicy.defaultMode,
       },
     });
   }),
@@ -124,8 +146,9 @@ router.post(
   validate({ body: aiIntentSchema }),
   asyncHandler(async (req, res) => {
     const runtime = await aiRuntime();
-    if (!env.aiEnabled || !runtime.matchingEnabled) {
-      const reason = !env.aiEnabled ? "AI_DISABLED" : "FEATURE_DISABLED";
+    const providerReady = (await getTargetsAsync()).length > 0;
+    if (!providerReady || !runtime.matchingEnabled) {
+      const reason = !providerReady ? "AI_DISABLED" : "FEATURE_DISABLED";
       return ok(res, {
         available: false,
         reason,
@@ -159,54 +182,144 @@ router.post(
   aiLimiter,
   validate({ body: aiChatSchema }),
   asyncHandler(async (req, res) => {
-    const { workspaceId, message, resourceIds, useGroupContext } = req.body;
+    const {
+      workspaceId,
+      message,
+      resourceIds,
+      useGroupContext,
+      sourceMode: requestedSourceMode,
+      researchOptions,
+    } = req.body;
     const runtime = await aiRuntime();
+    const webPolicy = await getWebSearchPolicy();
+    const sourceMode = requestedSourceMode ?? webPolicy.defaultMode;
+    const startedAt = Date.now();
 
-    if (!env.aiEnabled || !runtime.assistantEnabled) {
-      const reason = !env.aiEnabled ? "AI_DISABLED" : "FEATURE_DISABLED";
+    const providerReady = (await getTargetsAsync()).length > 0;
+    if (!providerReady || !runtime.assistantEnabled) {
+      const reason = !providerReady ? "AI_DISABLED" : "FEATURE_DISABLED";
       return ok(res, {
         available: false,
         reason,
         message: "Ask is unavailable in this environment.",
         answer: null,
+        sourceMode,
+        grounded: false,
         sources: [],
+        searches: [],
+        limitations: [],
       });
     }
 
     // Authorisation happens before retrieval, never after: the prompt is only
     // built from context this student may already read.
-    let workspace = null;
     if (workspaceId) {
-      workspace = await assertWorkspaceAccess(workspaceId, req.user.id).then(
-        (access) => access.workspace,
-      );
+      await assertWorkspaceAccess(workspaceId, req.user.id);
     }
 
-    const context = await gatherContext({
-      userId: req.user.id,
-      workspaceId: useGroupContext ? workspaceId : null,
-      resourceIds,
-      message,
-    });
+    const needsLocal = sourceMode !== "WEB";
+    const context = needsLocal
+      ? await gatherContext({
+          userId: req.user.id,
+          workspaceId: useGroupContext ? workspaceId : null,
+          resourceIds,
+          message,
+        })
+      : { resources: [], chunks: [], recentMessages: [], platformContext: [] };
+    const localSources = buildLocalSources(context);
+    const privateSearchTerms = collectPrivateSearchTerms(context);
+    const searches = [];
+    const webSources = [];
+    const limitations = [];
+    const explicitWeb = sourceMode === "WEB" || sourceMode === "BOTH";
+    const searchRequired = explicitWeb || (sourceMode === "AUTO" && shouldSearchAutomatically({ message, context }));
 
-    // No evidence means no answer. Inventing one would be the single worst
-    // failure mode for an academic tool.
-    if (context.chunks.length === 0 && context.recentMessages.length === 0 && context.platformContext.length === 0) {
+    if (sourceMode === "AUTO" && !searchRequired) {
+      limitations.push("Automatic mode used authorized TWIGANE material only; no internet search was performed.");
+    }
+
+    if (searchRequired) {
+      const providerStatus = getSearchProviderStatus();
+      if (!webPolicy.enabled || !providerStatus.configured) {
+        if (sourceMode === "WEB") {
+          return ok(res, unavailableWebResponse(sourceMode, webPolicy.enabled, providerStatus.configured));
+        }
+        limitations.push("Web research was not available, so this answer uses only authorized TWIGANE material.");
+      } else {
+        try {
+          const webResult = await searchWeb({
+            query: message,
+            ...researchOptions,
+            privateTerms: privateSearchTerms,
+            actorId: req.user.id,
+            policy: webPolicy,
+          });
+          webSources.push(...webResult.sources.map((source, index) => ({
+            ...source,
+            id: `WEB:${index + 1}`,
+          })));
+          searches.push(webResult.search);
+          await recordWebSearchAudit({
+            actorId: req.user.id,
+            sourceMode,
+            provider: webResult.search.provider,
+            queryHash: webResult.search.queryHash,
+            sourceDomains: webSources.map((source) => source.domain),
+            latencyMs: webResult.search.latencyMs,
+            status: "SUCCESS",
+          });
+          if (!webSources.length) limitations.push("No reliable source was found on the public web.");
+        } catch (error) {
+          await recordWebSearchAudit({
+            actorId: req.user.id,
+            sourceMode,
+            provider: error.context?.provider ?? providerStatus.provider,
+            queryHash: hashSearchQuery(message, { privateTerms: privateSearchTerms }),
+            latencyMs: Date.now() - startedAt,
+            status: "FAILURE",
+            errorCode: error.code ?? "WEB_SEARCH_ERROR",
+          });
+          if (sourceMode === "WEB") return ok(res, webFailureResponse(sourceMode));
+          limitations.push("Web research was unavailable, so this answer uses only authorized TWIGANE material.");
+        }
+      }
+    }
+
+    if (!localSources.length && !webSources.length) {
       return ok(res, {
         available: true,
         answer: null,
         reason: "NO_CONTEXT",
         message: workspaceId
-          ? "Your group has no material I can read yet. Share a resource or a file first."
-          : "No material is available to answer from yet.",
+          ? "No reliable source was found. Your group has no material I can read yet."
+          : "No reliable source was found for that question.",
+        sourceMode,
+        grounded: false,
         sources: [],
+        searches,
+        limitations,
+        latencyMs: Date.now() - startedAt,
       });
     }
 
     const answer = await measured("ASSISTANT", req.user.id, () =>
-      answerFromContext(message, context, { timeoutMs: runtime.timeoutMs }),
+      answerFromGrounding({
+        message,
+        sourceMode,
+        localSources,
+        webSources,
+        maxWebChars: webPolicy.maxContextChars,
+        timeoutMs: runtime.timeoutMs,
+        callModel,
+      }),
     );
-    return ok(res, answer);
+    return ok(res, {
+      ...answer,
+      sourceMode,
+      searches,
+      limitations: [...new Set([...(answer.limitations ?? []), ...limitations])],
+      latencyMs: Date.now() - startedAt,
+    });
   }),
 );
 
@@ -222,8 +335,9 @@ router.post(
   validate({ params: z.object({ resourceId: z.string().uuid() }) }),
   asyncHandler(async (req, res) => {
     const runtime = await aiRuntime();
-    if (!env.aiEnabled || !runtime.assistantEnabled) {
-      const reason = !env.aiEnabled ? "AI_DISABLED" : "FEATURE_DISABLED";
+    const providerReady = (await getTargetsAsync()).length > 0;
+    if (!providerReady || !runtime.assistantEnabled) {
+      const reason = !providerReady ? "AI_DISABLED" : "FEATURE_DISABLED";
       return ok(res, { available: false, reason, summary: null });
     }
 
@@ -335,6 +449,51 @@ router.delete(
 // Retrieval and generation
 // ---------------------------------------------------------------------------
 
+/** Build the same student-scoped eligible set used by the natural-language route. */
+async function loadEligible(studentId, body) {
+  const courses = await queryRows(
+    `SELECT c.id, c.course_code, c.name
+       FROM student_courses sc JOIN courses c ON c.id = sc.course_id
+      WHERE sc.student_id = $1 AND sc.is_active AND c.is_active
+        AND ($2::uuid[] IS NULL OR c.id = ANY($2::uuid[]))
+      ORDER BY c.course_code
+      LIMIT 60`,
+    [studentId, body.eligibleCourseIds.length ? body.eligibleCourseIds : null],
+    "ai:eligibleCourses",
+  );
+
+  const topics = await queryRows(
+    `SELECT ct.id, c.course_code, ct.name
+       FROM course_topics ct
+       JOIN courses c ON c.id = ct.course_id
+       JOIN student_courses sc ON sc.course_id = ct.course_id AND sc.student_id = $3 AND sc.is_active
+      WHERE ($1::uuid[] IS NULL OR ct.id = ANY($1::uuid[]))
+        AND ($2::uuid[] IS NULL OR ct.course_id = ANY($2::uuid[]))
+      ORDER BY c.course_code, ct.name
+      LIMIT 120`,
+    [
+      body.eligibleTopicIds.length ? body.eligibleTopicIds : null,
+      body.eligibleCourseIds.length ? body.eligibleCourseIds : null,
+      studentId,
+    ],
+    "ai:eligibleTopics",
+  );
+
+  const goals = await queryRows(
+    `SELECT id, code, label FROM learning_goals
+      WHERE ($1::uuid[] IS NULL OR id = ANY($1::uuid[]))
+      ORDER BY code`,
+    [body.goalIds.length ? body.goalIds : null],
+    "ai:eligibleGoals",
+  );
+
+  return {
+    courses: courses.map((course) => ({ id: course.id, courseCode: course.course_code, name: course.name })),
+    topics: topics.map((topic) => ({ id: topic.id, courseCode: topic.course_code, name: topic.name })),
+    goals: goals.map((goal) => ({ id: goal.id, code: goal.code, label: goal.label })),
+  };
+}
+
 /**
  * Gather the text this student is allowed to use as context.
  *
@@ -365,10 +524,10 @@ async function gatherContext({ userId, workspaceId, resourceIds, message }) {
              JOIN study_group_members m ON m.group_id = g.id
            WHERE wg.workspace_id = r.workspace_id AND m.student_id = ${bind(userId)}
              AND m.left_at IS NULL AND m.status = 'ACTIVE'))
-      OR
-      (r.course_id IS NOT NULL AND EXISTS (
-         SELECT 1 FROM student_courses sc
-          WHERE sc.course_id = r.course_id AND sc.student_id = ${bind(userId)}))
+       OR
+       (r.course_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM student_courses sc
+           WHERE sc.course_id = r.course_id AND sc.student_id = ${bind(userId)} AND sc.is_active))
     )`,
   ];
 
@@ -532,6 +691,15 @@ const tokenise = (text) =>
       .filter((token) => token.length > 2),
   );
 
+function collectPrivateSearchTerms(context = {}) {
+  return [
+    ...(context.resources ?? []).map((resource) => resource.title),
+    ...(context.recentMessages ?? []).flatMap((message) => [message.first_name, message.last_name]),
+  ]
+    .map((value) => String(value ?? "").trim())
+    .filter((value) => value.length >= 3);
+}
+
 function splitIntoChunks(text, size = 1200) {
   const value = String(text ?? "").trim();
   if (!value) return [];
@@ -550,98 +718,6 @@ function overlapScore(keywords, chunk) {
     if (tokens.has(keyword)) hits += 1;
   }
   return hits / keywords.size;
-}
-
-/**
- * Ask the model, constrained to the retrieved text, and demand citations.
- *
- * The instruction to refuse rather than guess is part of the prompt, not a hope.
- * Sources are then filtered to those the response actually quotes, so the UI
- * shows no citation the answer did not use.
- */
-async function answerFromContext(message, context, { timeoutMs } = {}) {
-  const contextBlocks = context.chunks.length
-    ? context.chunks.map((entry, index) => `[${index + 1}] (resource: ${entry.resource.title})\n${entry.chunk}`)
-    : [];
-
-  if (context.recentMessages.length) {
-    contextBlocks.push(
-      `Recent group discussion:\n${context.recentMessages.map((m) => `${m.first_name ?? "Someone"}: ${m.body}`).join("\n")}`,
-    );
-  }
-
-  const hasPlatform = context.platformContext?.length > 0;
-  if (hasPlatform) {
-    contextBlocks.push(`The student's platform snapshot:\n${context.platformContext.join("\n")}`);
-  }
-
-  const system = [
-    "You answer questions about a study group's own material.",
-    "",
-    "Rules you must follow:",
-    "- Use ONLY the numbered context below. If it does not contain the answer, say so plainly.",
-    "- Never use general knowledge to fill a gap. Guessing is worse than admitting ignorance here.",
-    "- Cite the numbers you used, like [1], inline.",
-    "- If the context is off-topic, say the material does not cover it.",
-    "- Be concise and practical. A student is usually preparing for an exam.",
-    ...(hasPlatform
-      ? ["- The platform snapshot is factual data about the student's own account. You may answer from it directly without citing it."]
-      : []),
-    "",
-    "CONTEXT:",
-    ...contextBlocks,
-  ].join("\n");
-
-  const { text: response, model } = await callModel(
-    [
-      { role: "system", content: system },
-      { role: "user", content: message },
-    ],
-    timeoutMs,
-  );
-
-  const cited = new Set();
-  for (const match of response.matchAll(/\[(\d+)\]/g)) {
-    const index = Number.parseInt(match[1], 10) - 1;
-    if (index >= 0 && index < context.chunks.length) cited.add(index);
-  }
-
-  const sources = [...cited]
-    .sort((a, b) => a - b)
-    .map((index) => {
-      const entry = context.chunks[index];
-      return {
-        resourceId: entry.resource.id,
-        title: entry.resource.title,
-        kind: entry.resource.kind,
-        relevance: Number(entry.score.toFixed(2)),
-        excerpt: entry.chunk.slice(0, 240),
-      };
-    });
-
-  // Nothing cited and no discussion or platform context means the model ignored
-  // its instructions. Better to return nothing than to present an unsourced
-  // answer as if it came from the group's material.
-  const hasDiscussion = context.recentMessages.length > 0;
-  if (sources.length === 0 && !hasDiscussion && !hasPlatform) {
-    return {
-      available: true,
-      answer: null,
-      reason: "NO_GROUNDING",
-      message: "I could not find anything in your material that answers that.",
-      sources: [],
-    };
-  }
-
-  return {
-    available: true,
-    answer: response,
-    sources,
-    model,
-    // Explicit honesty about grounding: with no citations the text is discussion
-    // synthesis, not something the group wrote down.
-    grounded: sources.length > 0,
-  };
 }
 
 async function summariseResource(resource, { timeoutMs } = {}) {
@@ -678,7 +754,9 @@ async function loadAccessibleResource(userId, resourceId) {
   return queryOne(
       `SELECT r.* FROM resources r
        LEFT JOIN workspaces w ON w.id = r.workspace_id
-       WHERE r.id = $1 AND r.is_deleted = FALSE AND (
+       WHERE r.id = $1 AND r.is_deleted = FALSE
+         AND (r.visibility <> 'PRIVATE' OR r.uploaded_by = $2)
+         AND (
          (r.workspace_id IS NOT NULL AND w.is_archived = FALSE AND EXISTS (
             SELECT 1
              FROM workspace_groups wg
@@ -687,9 +765,9 @@ async function loadAccessibleResource(userId, resourceId) {
             WHERE wg.workspace_id = r.workspace_id AND m.student_id = $2
               AND m.left_at IS NULL AND m.status = 'ACTIVE'))
         OR
-        (r.course_id IS NOT NULL AND EXISTS (
-           SELECT 1 FROM student_courses sc WHERE sc.course_id = r.course_id AND sc.student_id = $2))
-      )`,
+         (r.course_id IS NOT NULL AND EXISTS (
+            SELECT 1 FROM student_courses sc WHERE sc.course_id = r.course_id AND sc.student_id = $2 AND sc.is_active))
+       )`,
     [resourceId, userId],
     "ai:loadResource",
   );

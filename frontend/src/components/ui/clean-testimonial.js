@@ -129,7 +129,7 @@ export function Testimonial() {
       <div className="clean-testimonial-card relative overflow-hidden rounded-[32px] p-6 sm:p-8 md:p-10">
         <div className="relative">
           <div className="mb-8 flex items-center gap-3 text-[10px] font-semibold uppercase tracking-[0.28em] text-muted-foreground">
-            <span className="inline-block size-2.5 rounded-full bg-[#1aa46e] shadow-[0_0_0_4px_rgba(26,164,110,0.16)]" />
+            <span className="inline-block size-2.5 rounded-full bg-[var(--brand-blue)] shadow-[0_0_0_4px_var(--brand-blue-soft)]" />
             Testimonial
           </div>
 
@@ -141,7 +141,7 @@ export function Testimonial() {
                     <motion.div
                       key={item.author}
                       className={`relative h-9 w-9 overflow-hidden rounded-full border-2 border-background transition ${
-                        index === activeIndex ? "ring-1 ring-[#cfe5d8] ring-offset-1 ring-offset-background" : "grayscale opacity-60"
+                        index === activeIndex ? "ring-1 ring-[var(--brand-sky-strong)] ring-offset-1 ring-offset-background" : "grayscale opacity-60"
                       }`}
                       whileHover={{ scale: 1.08, opacity: 1 }}
                     >
@@ -176,7 +176,7 @@ export function Testimonial() {
                 >
                   <svg
                     aria-hidden="true"
-                    className="mb-1 mr-2 inline-block h-5 w-5 align-top text-[#1aa46e]"
+                    className="mb-1 mr-2 inline-block h-5 w-5 align-top text-[var(--brand-blue)]"
                     viewBox="0 0 24 24"
                     fill="currentColor"
                   >
@@ -197,7 +197,7 @@ export function Testimonial() {
                 >
                   <div className="relative h-14 w-14 shrink-0">
                     <motion.div
-                      className="absolute -inset-1.5 rounded-full border border-[#cfe5d8]"
+                      className="absolute -inset-1.5 rounded-full border border-[var(--brand-sky-strong)]"
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
                       transition={{ duration: 0.42 }}
@@ -210,7 +210,7 @@ export function Testimonial() {
                   </div>
 
                   <div className="relative pl-4">
-                    <div className="absolute inset-y-0 left-0 w-px bg-[#1aa46e]" />
+                    <div className="absolute inset-y-0 left-0 w-px bg-[var(--brand-blue)]" />
                     <span className="block text-sm font-medium text-foreground md:text-base">{currentTestimonial.author}</span>
                     <span className="mt-1 block text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
                       {currentTestimonial.role} — {currentTestimonial.company}
@@ -222,9 +222,9 @@ export function Testimonial() {
 
           </div>
 
-          <div className="mt-8 h-px overflow-hidden bg-[#e4ece7]">
+          <div className="mt-8 h-px overflow-hidden bg-[var(--border)]">
             <motion.div
-              className="h-full bg-[#1aa46e]"
+              className="h-full bg-[var(--brand-blue)]"
               initial={{ width: "0%" }}
               animate={{ width: `${((activeIndex + 1) / testimonials.length) * 100}%` }}
               transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}

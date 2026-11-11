@@ -84,7 +84,7 @@ const adapters = {
           code: "AI_BAD_RESPONSE",
         });
       }
-      return content;
+      return { text: content, usage: payload?.usage ?? null };
     },
   },
   anthropic: {
@@ -128,7 +128,48 @@ const adapters = {
           code: "AI_BAD_RESPONSE",
         });
       }
-      return content;
+      return { text: content, usage: payload?.usage ?? null };
+    },
+  },
+  gemini: {
+    name: "gemini",
+    label: "Google Gemini",
+    async chatCompletions(messages, { model, timeoutMs, jsonMode = true }) {
+      const baseUrl = (model?.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta").replace(/\/$/, "");
+      const url = `${baseUrl}/models/${encodeURIComponent(model?.chatModel ?? "gemini-2.0-flash")}:generateContent?key=${encodeURIComponent(model?.apiKey ?? "")}`;
+      const system = messages.find((message) => message.role === "system")?.content;
+      const contents = messages
+        .filter((message) => message.role !== "system")
+        .map((message) => ({ role: message.role === "assistant" ? "model" : "user", parts: [{ text: String(message.content ?? "") }] }));
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+          contents,
+          generationConfig: {
+            temperature: 0,
+            maxOutputTokens: model?.maxOutputTokens ?? 900,
+            ...(jsonMode ? { responseMimeType: "application/json" } : {}),
+          },
+        }),
+        signal: AbortSignal.timeout(timeoutMs ?? 25000),
+      });
+      const body = await response.text().catch(() => "");
+      let payload = null;
+      try { payload = body ? JSON.parse(body) : null; } catch { payload = null; }
+      if (!response.ok) {
+        throw new AppError("AI provider returned an error", {
+          status: response.status,
+          code: "AI_PROVIDER_ERROR",
+          details: body.slice(0, 300),
+        });
+      }
+      const content = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("");
+      if (typeof content !== "string" || content.trim() === "") {
+        throw new AppError("AI provider returned an unusable response", { status: 502, code: "AI_BAD_RESPONSE" });
+      }
+      return { text: content, usage: payload?.usageMetadata ?? null };
     },
   },
 };

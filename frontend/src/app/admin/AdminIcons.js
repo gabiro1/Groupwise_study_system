@@ -166,6 +166,45 @@ export function CloseIcon(props) {
   );
 }
 
+export function PlusIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="M12 5v14M5 12h14" />
+    </Icon>
+  );
+}
+
+export function SendIcon(props) {
+  return <Icon {...props}><path d="m21 3-7.2 18-3.6-7.2L3 10.2 21 3Z" /><path d="M10.2 13.8 15 9" /></Icon>;
+}
+
+export function ArchiveIcon(props) {
+  return <Icon {...props}><path d="M4 7h16v13H4zM3 4h18v3H3z" /><path d="M9 11h6" /></Icon>;
+}
+
+export function MegaphoneIcon(props) {
+  return <Icon {...props}><path d="M3 11v2a2 2 0 0 0 2 2h2l9 4V5l-9 4H5a2 2 0 0 0-2 2Z" /><path d="m7 15 2 6h4l-2.5-5.1M16 9a4 4 0 0 1 0 6" /></Icon>;
+}
+
+
+export function EditIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="m14.5 5.5 4 4" />
+      <path d="M4 20h4l10.8-10.8a2.8 2.8 0 0 0-4-4L4 16v4Z" />
+    </Icon>
+  );
+}
+
+export function TrashIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="M4 7h16M10 11v5M14 11v5" />
+      <path d="M9 7V4h6v3M6 7l1 14h10l1-14" />
+    </Icon>
+  );
+}
+
 export function TrendUpIcon(props) {
   return (
     <Icon {...props}>
@@ -253,6 +292,26 @@ export function LayersIcon(props) {
     <Icon {...props}>
       <path d="m12 3 9 4.8-9 4.8-9-4.8L12 3Z" />
       <path d="m3 12.3 9 4.8 9-4.8M3 16.8 12 21.6l9-4.8" />
+    </Icon>
+  );
+}
+
+export function GridIcon(props) {
+  return (
+    <Icon {...props}>
+      <rect x="4" y="4" width="6" height="6" rx="1" />
+      <rect x="14" y="4" width="6" height="6" rx="1" />
+      <rect x="4" y="14" width="6" height="6" rx="1" />
+      <rect x="14" y="14" width="6" height="6" rx="1" />
+    </Icon>
+  );
+}
+
+export function ListIcon(props) {
+  return (
+    <Icon {...props}>
+      <path d="M8 6h12M8 12h12M8 18h12" />
+      <path d="M4 6h.01M4 12h.01M4 18h.01" />
     </Icon>
   );
 }

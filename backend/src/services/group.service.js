@@ -667,7 +667,7 @@ export async function respondToInvitation(userId, invitationId, response) {
  * group has turned approval off. INVITE_ONLY cannot be joined at all — that is
  * what makes it private.
  */
-export async function joinGroup(groupId, studentId, { message } = {}) {
+export async function joinGroup(groupId, studentId, { message, recommendationId } = {}) {
   const group = await queryOne(
     `SELECT id, name, slug, privacy, require_approval, member_count, max_size, course_id
        FROM study_groups WHERE id = $1 AND status = 'ACTIVE'`,
@@ -695,6 +695,10 @@ export async function joinGroup(groupId, studentId, { message } = {}) {
     throw new CapacityError("This study group is already full.");
   }
 
+  const attributedRecommendationId = recommendationId
+    ? await validateGroupRecommendation(recommendationId, groupId, studentId)
+    : null;
+
   const needsRequest = group.privacy === "REQUEST_REQUIRED" && group.require_approval;
 
   if (!needsRequest) {
@@ -707,7 +711,13 @@ export async function joinGroup(groupId, studentId, { message } = {}) {
         [groupId, studentId],
         "groups:directJoin",
       );
-      await openMembershipOutcome(tx, groupId, studentId, "DIRECT");
+       await openMembershipOutcome(
+         tx,
+         groupId,
+         studentId,
+         attributedRecommendationId ? "AI_ASSISTED" : "DIRECT",
+         attributedRecommendationId,
+       );
       await tx.query(
         `INSERT INTO group_activity_events (group_id, actor_id, event_type, entity_type, entity_id)
          VALUES ($1, $2, 'MEMBER_JOINED', 'user', $2)`,
@@ -722,12 +732,13 @@ export async function joinGroup(groupId, studentId, { message } = {}) {
   // The conflict target must match the partial index exactly, predicate included,
   // or Postgres cannot infer it.
   const request = await queryOne(
-    `INSERT INTO study_group_join_requests (group_id, student_id, message)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (group_id, student_id) WHERE status = 'PENDING'
-     DO UPDATE SET message = EXCLUDED.message
-     RETURNING id, status, created_at`,
-    [groupId, studentId, message ?? null],
+    `INSERT INTO study_group_join_requests (group_id, student_id, message, recommendation_id)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (group_id, student_id) WHERE status = 'PENDING'
+      DO UPDATE SET message = EXCLUDED.message,
+                    recommendation_id = COALESCE(EXCLUDED.recommendation_id, study_group_join_requests.recommendation_id)
+      RETURNING id, status, created_at`,
+    [groupId, studentId, message ?? null, attributedRecommendationId],
     "groups:createRequest",
   );
 
@@ -752,10 +763,17 @@ export async function joinGroup(groupId, studentId, { message } = {}) {
   return { status: "REQUESTED", requestId: request.id, groupId, groupSlug: group.slug };
 }
 
-/** Approve or reject a join request. */
-export async function decideJoinRequest(actorId, requestId, decision, note) {
+/**
+ * Approve or reject a join request.
+ *
+ * Administrators use the same membership transaction as group leaders, but the
+ * route supplies `allowAdmin` after its own admin-only middleware has run. The
+ * expected group id keeps the nested URL resource-bound and prevents a request
+ * from one group being acted on through another group's URL.
+ */
+export async function decideJoinRequest(actorId, requestId, decision, note, options = {}) {
   const request = await queryOne(
-    `SELECT jr.*, g.name AS group_name, g.slug, g.member_count, g.max_size, g.owner_id
+    `SELECT jr.*, g.name AS group_name, g.slug, g.member_count, g.max_size, g.owner_id, g.status AS group_status
        FROM study_group_join_requests jr JOIN study_groups g ON g.id = jr.group_id
       WHERE jr.id = $1`,
     [requestId],
@@ -764,12 +782,20 @@ export async function decideJoinRequest(actorId, requestId, decision, note) {
 
   if (!request) throw new NotFoundError("That join request");
 
+  if (options.expectedGroupId && request.group_id !== options.expectedGroupId) {
+    throw new NotFoundError("That join request");
+  }
+
   // Moderator check via the request's own group, so a request id from another
   // group cannot be decided through this endpoint.
-  await assertModerator(request.group_id, actorId);
+  if (!options.allowAdmin) await assertModerator(request.group_id, actorId);
 
   if (request.status !== "PENDING") {
     throw new ConflictError("That request has already been decided.");
+  }
+
+  if (request.group_status !== "ACTIVE") {
+    throw new ConflictError("A closed group cannot admit new members.");
   }
 
   const approve = decision === "APPROVE";
@@ -779,13 +805,16 @@ export async function decideJoinRequest(actorId, requestId, decision, note) {
   }
 
   await withTransaction(async (tx) => {
-    await tx.query(
+    const updated = await tx.query(
       `UPDATE study_group_join_requests
           SET status = $2, decided_by = $3, decided_at = now(), decision_note = $4
         WHERE id = $1 AND status = 'PENDING'`,
       [requestId, approve ? "APPROVED" : "REJECTED", actorId, note ?? null],
       "groups:decideRequest",
     );
+    if ((updated.rowCount ?? 0) !== 1) {
+      throw new ConflictError("That request has already been decided.");
+    }
 
     if (approve) {
       await tx.query(
@@ -796,7 +825,13 @@ export async function decideJoinRequest(actorId, requestId, decision, note) {
         [request.group_id, request.student_id],
         "groups:approveMembership",
       );
-      await openMembershipOutcome(tx, request.group_id, request.student_id, "JOIN_REQUEST");
+       await openMembershipOutcome(
+         tx,
+         request.group_id,
+         request.student_id,
+         request.recommendation_id ? "AI_ASSISTED" : "JOIN_REQUEST",
+         request.recommendation_id,
+       );
     }
 
     await tx.query(
@@ -816,7 +851,13 @@ export async function decideJoinRequest(actorId, requestId, decision, note) {
     metadata: { groupId: request.group_id, requestId },
   });
 
-  return { status: approve ? "APPROVED" : "REJECTED", groupId: request.group_id };
+  return {
+    status: approve ? "APPROVED" : "REJECTED",
+    groupId: request.group_id,
+    requestId,
+    studentId: request.student_id,
+    groupName: request.group_name,
+  };
 }
 
 /**
@@ -1155,16 +1196,43 @@ export async function listModerationQueue(groupId, actorId) {
 
 async function workspaceFor(groupId) {
   const row = await queryOne(
-    `SELECT w.id
-       FROM workspace_groups wg
-       JOIN workspaces w ON w.id = wg.workspace_id
-      WHERE wg.group_id = $1 AND NOT w.is_archived
-      ORDER BY wg.assigned_at DESC
+     `SELECT w.id
+        FROM workspaces w
+        LEFT JOIN workspace_groups wg ON wg.workspace_id = w.id AND wg.group_id = $1
+       WHERE NOT w.is_archived
+         AND (w.group_id = $1 OR wg.group_id = $1)
+       ORDER BY wg.assigned_at DESC NULLS LAST, w.created_at DESC
       LIMIT 1`,
     [groupId],
     "groups:workspaceFor",
   );
   return row?.id ?? null;
+}
+
+/** Validate that an attributed recommendation belongs to this student and group. */
+async function validateGroupRecommendation(recommendationId, groupId, studentId) {
+  const row = await queryOne(
+    `SELECT r.id
+       FROM recommendations r
+      WHERE r.id = $1
+        AND r.student_id = $2
+        AND r.kind = 'GROUP'
+        AND (
+          r.target_group_id = $3
+          OR EXISTS (
+            SELECT 1 FROM workspaces w
+             WHERE w.id = r.target_workspace_id
+               AND (w.group_id = $3 OR EXISTS (
+                 SELECT 1 FROM workspace_groups wg
+                  WHERE wg.workspace_id = w.id AND wg.group_id = $3
+               ))
+          )
+        )`,
+    [recommendationId, studentId, groupId],
+    "groups:validateRecommendationAttribution",
+  );
+  if (!row) throw new NotFoundError("That recommendation");
+  return row.id;
 }
 
 /**
@@ -1185,11 +1253,12 @@ async function workspaceFor(groupId) {
  */
 async function openMembershipOutcome(tx, groupId, studentId, joinedVia, recommendationId = null) {
   const workspace = await tx.query(
-    `SELECT w.id
-       FROM workspace_groups wg
-       JOIN workspaces w ON w.id = wg.workspace_id
-      WHERE wg.group_id = $1 AND NOT w.is_archived
-      ORDER BY wg.assigned_at DESC
+     `SELECT w.id
+        FROM workspaces w
+        LEFT JOIN workspace_groups wg ON wg.workspace_id = w.id AND wg.group_id = $1
+       WHERE NOT w.is_archived
+         AND (w.group_id = $1 OR wg.group_id = $1)
+       ORDER BY wg.assigned_at DESC NULLS LAST, w.created_at DESC
       LIMIT 1`,
     [groupId],
     "groups:outcomeWorkspace",
@@ -1231,7 +1300,9 @@ async function closeMembershipOutcome(tx, groupId, studentId, reason) {
             leave_reason = $3
        FROM workspaces w
       WHERE o.workspace_id = w.id
-        AND EXISTS (SELECT 1 FROM workspace_groups wg WHERE wg.workspace_id = w.id AND wg.group_id = $1)
+         AND (w.group_id = $1 OR EXISTS (
+           SELECT 1 FROM workspace_groups wg WHERE wg.workspace_id = w.id AND wg.group_id = $1
+         ))
         AND o.student_id = $2
         AND o.left_at IS NULL`,
     [groupId, studentId, reason],
