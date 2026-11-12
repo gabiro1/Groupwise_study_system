@@ -42,7 +42,6 @@ DELETE FROM notifications
  WHERE type::text IN ('PARTNER_INVITATION', 'PARTNER_ACCEPTED', 'DIRECT_MESSAGE');
 
 ALTER TABLE notifications
-  ALTER COLUMN type DROP DEFAULT,
   ALTER COLUMN type TYPE text USING type::text;
 
 DROP TYPE notification_type;
@@ -57,6 +56,3 @@ CREATE TYPE notification_type AS ENUM (
 
 ALTER TABLE notifications
   ALTER COLUMN type TYPE notification_type USING type::notification_type;
-
-ALTER TABLE notifications
-  ALTER COLUMN type SET DEFAULT 'SYSTEM'::notification_type;
