@@ -92,32 +92,33 @@ test.describe("Phase 3 browser validation", () => {
     await page.waitForURL(/\/login/);
   });
 
-  test("student profile, partner recommendations, and backend explanation agreement", async ({ page }) => {
+  test("student profile, group recommendations, and backend explanation agreement", async ({ page }) => {
     await login(page, "student");
     await saveStudentMatchingProfile(page);
 
+    const groupResponsePromise = page.waitForResponse((response) => {
+      if (!response.url().includes("/api/recommendations") || response.request().method() !== "POST") return false;
+      try { return JSON.parse(response.request().postData() || "{}").kind === "GROUP"; } catch { return false; }
+    });
     await page.goto("/dashboard/recommendations");
     await expect(page.getByRole("heading", { name: "Recommended for you" })).toBeVisible();
-
-    const partnerResponsePromise = page.waitForResponse((response) => {
-      if (!response.url().includes("/api/recommendations") || response.request().method() !== "POST") return false;
-      try { return JSON.parse(response.request().postData() || "{}").kind === "STUDENT"; } catch { return false; }
-    });
-    await page.getByRole("tab", { name: "Study partners" }).click();
-    const partnerResponse = await partnerResponsePromise;
-    const partnerPayload = await partnerResponse.json();
-    const partner = partnerPayload.data.results[0];
-    expect(partner).toBeTruthy();
-    expect(partner.score).toBeGreaterThanOrEqual(40);
-    expect(partner.explanation.length).toBeGreaterThan(0);
+    const groupPayload = await (await groupResponsePromise).json();
+    const group = groupPayload.data.results[0];
+    expect(group).toBeTruthy();
+    expect(group.score).toBeGreaterThanOrEqual(40);
+    expect(group.explanation.length).toBeGreaterThan(0);
 
     const card = page.locator(".recommendation-card").first();
     await expect(card).toBeVisible();
-    await expect(card.locator(".match-score strong")).toHaveText(`${Math.round(partner.score)}%`);
-    await expect(card).toContainText("Why this partner?");
-    await expect(card).toContainText(partner.reasons[0].detail);
-    await expect(card.getByRole("button", { name: "Send partner request" })).toBeVisible();
-    await page.screenshot({ path: "artifacts/phase3/partner-recommendation.png", fullPage: true });
+    await expect(card.locator(".match-score strong")).toHaveText(`${Math.round(group.score)}%`);
+    await expect(card).toContainText("Why this group?");
+    await expect(card).toContainText(group.reasons[0].detail);
+    await expect(card.getByRole("button", { name: "Join group" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Study partners" })).toHaveCount(0);
+    await page.screenshot({ path: "artifacts/phase3/group-recommendation.png", fullPage: true });
+
+    const removedRoute = await page.goto("/dashboard/partners");
+    expect(removedRoute?.status()).toBe(404);
   });
 
   test("group recommendations, eligibility messaging, group discovery, sessions, and notifications", async ({ page }) => {
@@ -133,7 +134,7 @@ test.describe("Phase 3 browser validation", () => {
     const groupPayload = await groupResponse.json();
     const group = groupPayload.data.results[0];
     expect(group).toBeTruthy();
-    expect(group.workspaceId).toBeTruthy();
+     expect(group.groupId).toBeTruthy();
     expect(group.score).toBeGreaterThanOrEqual(40);
 
     const card = page.locator(".recommendation-card").first();

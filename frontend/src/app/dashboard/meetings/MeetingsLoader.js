@@ -29,11 +29,11 @@ const MeetingDetail = dynamic(() => import("./MeetingDetail"), {
  * dashboard's `{ mine, discovered }` bundle; normalise before filtering so a
  * shape mismatch can never crash the section.
  */
-export default function MeetingsLoader({ section, meetingId, groups }) {
-  if (section === "meetingDetail" && meetingId) return <MeetingDetail meetingId={meetingId} />;
+export default function MeetingsLoader({ section, meetingId, groups, groupId = null, group = null }) {
+  if (meetingId) return <MeetingDetail meetingId={meetingId} groupId={groupId} />;
   const mine = Array.isArray(groups) ? groups : (groups?.mine ?? []);
   const leadGroups = (Array.isArray(mine) ? mine : []).filter(
     (g) => ["OWNER", "MODERATOR"].includes(g?.myRole || g?.my_role),
   );
-  return <MeetingsSection leadGroups={leadGroups} />;
+  return <MeetingsSection leadGroups={leadGroups} groupId={groupId} group={group} />;
 }

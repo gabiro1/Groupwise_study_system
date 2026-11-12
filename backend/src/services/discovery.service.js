@@ -11,7 +11,7 @@ import {
 import { computeCompatibility, buildExplanation, strengthLabel } from "../lib/scoring.js";
 import { STUDY_MODES, LEARNING_GOAL_LABELS } from "../config/constants.js";
 
-function canReceivePartnerInvite(row) {
+function canReceiveGroupInvite(row) {
   const policy = row.allow_invites_from ?? "ANY";
   return policy === "ANY" || (policy === "SHARED_GROUPS" && Boolean(row.already_shares_group));
 }
@@ -164,9 +164,9 @@ export async function searchStudents(viewerId, filters = {}) {
       warnings: scored ? scored.warnings : [],
       // What the viewer may do, resolved server-side. The client renders buttons
       // from this instead of deciding for itself.
-      canInvite: canReceivePartnerInvite(row),
+      canInvite: canReceiveGroupInvite(row),
       inviteBlockedReason:
-        !canReceivePartnerInvite(row)
+        !canReceiveGroupInvite(row)
           ? "This student is not accepting invitations right now."
           : null,
     };
@@ -609,7 +609,7 @@ export async function getStudentProfile(viewerId, studentId) {
     compatibility: scored ? { score: scored.score, label: strengthLabel(scored.score) } : null,
     reasons: scored?.reasons ?? [],
     warnings: scored?.warnings ?? [],
-    canInvite: canReceivePartnerInvite(row),
+    canInvite: canReceiveGroupInvite(row),
     isSelf: false,
   };
 }

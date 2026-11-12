@@ -22,12 +22,13 @@ export default function UsersView() {
   const [q, setQ] = useState(searchParams.get("q") || "");
   const [role, setRole] = useState(searchParams.get("role") || "");
   const [status, setStatus] = useState(searchParams.get("status") || "");
+  const [registrationNumberStatus, setRegistrationNumberStatus] = useState(searchParams.get("registrationNumberStatus") || "");
 
   const [busyUser, setBusyUser] = useState("");
   const [suspendTarget, setSuspendTarget] = useState(null);
   const [suspendReason, setSuspendReason] = useState("");
   const [editTarget, setEditTarget] = useState(null);
-  const [editForm, setEditForm] = useState({ firstName: "", lastName: "", email: "", yearOfStudy: "" });
+  const [editForm, setEditForm] = useState({ firstName: "", lastName: "", email: "", yearOfStudy: "", admissionYear: "", currentSemester: "", registrationNumber: "", registrationNumberVerified: false, staffIdentifier: "" });
   const [editLoading, setEditLoading] = useState(false);
   const [editError, setEditError] = useState("");
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -39,10 +40,11 @@ export default function UsersView() {
       if (q.trim()) params.set("q", q.trim());
       if (role) params.set("role", role);
       if (status) params.set("status", status);
+      if (registrationNumberStatus) params.set("registrationNumberStatus", registrationNumberStatus);
       if (nextCursor != null) params.set("cursor", String(nextCursor));
       return params.toString();
     },
-    [q, role, status],
+    [q, role, status, registrationNumberStatus],
   );
 
   const load = useCallback(
@@ -99,6 +101,7 @@ export default function UsersView() {
     setQ("");
     setRole("");
     setStatus("");
+    setRegistrationNumberStatus("");
     setTimeout(() => reload(), 0);
   }
 
@@ -143,23 +146,6 @@ export default function UsersView() {
     }
   }
 
-  async function changeRole(user, nextRole) {
-    setBusyUser(`role:${user.id}`);
-    setError("");
-    try {
-      await apiRequest("admin/users/role", {
-        method: "POST",
-        body: JSON.stringify({ userId: user.id, role: nextRole, reason: "Changed from the admin console." }),
-      });
-      setMessage(`${displayName(user)} is now a ${nextRole.toLowerCase()}. Their sessions were revoked.`);
-      await reload();
-    } catch (requestError) {
-      setError(requestError.message);
-    } finally {
-      setBusyUser("");
-    }
-  }
-
   async function openEdit(user) {
     setEditTarget(user);
     setEditLoading(true);
@@ -172,6 +158,11 @@ export default function UsersView() {
         lastName: detail.last_name || "",
         email: detail.email || "",
         yearOfStudy: detail.year_of_study ?? "",
+        admissionYear: detail.admission_year ?? "",
+        currentSemester: detail.current_semester || "",
+        registrationNumber: detail.student_number || "",
+        registrationNumberVerified: Boolean(detail.registration_number_verified_at),
+        staffIdentifier: detail.staff_identifier || "",
       });
     } catch (requestError) {
       setEditError(requestError.message);
@@ -185,14 +176,23 @@ export default function UsersView() {
     setBusyUser(`edit:${editTarget.id}`);
     setEditError("");
     try {
+      const body = {
+        firstName: editForm.firstName.trim(),
+        lastName: editForm.lastName.trim(),
+        email: editForm.email.trim(),
+        yearOfStudy: editForm.yearOfStudy === "" ? null : Number(editForm.yearOfStudy),
+        admissionYear: editForm.admissionYear === "" ? null : Number(editForm.admissionYear),
+      };
+      if (editTarget.role === "STUDENT") {
+        body.registrationNumber = editForm.registrationNumber.trim() || null;
+        body.registrationNumberVerified = Boolean(editForm.registrationNumberVerified);
+        body.currentSemester = editForm.currentSemester.trim() || null;
+      }
+      if (editTarget.role === "ADMIN") body.staffIdentifier = editForm.staffIdentifier.trim() || null;
+
       const result = await apiRequest(`admin/users/${editTarget.id}`, {
         method: "PATCH",
-        body: JSON.stringify({
-          firstName: editForm.firstName.trim(),
-          lastName: editForm.lastName.trim(),
-          email: editForm.email.trim(),
-          yearOfStudy: editForm.yearOfStudy === "" ? null : Number(editForm.yearOfStudy),
-        }),
+        body: JSON.stringify(body),
       });
       setMessage(result.emailChanged ? "User details updated. The new email requires verification." : "User details updated.");
       setEditTarget(null);
@@ -245,16 +245,15 @@ export default function UsersView() {
 
       <section className="admin-card">
         <form className="admin-toolbar" onSubmit={applyFilters}>
-          <input
-            aria-label="Search users"
-            placeholder="Search by name or email"
+            <input
+              aria-label="Search users"
+              placeholder="Search by name, email, or identifier"
             value={q}
             onChange={(event) => setQ(event.target.value)}
           />
             <select aria-label="Filter by role" value={role} onChange={(event) => setRole(event.target.value)}>
               <option value="">All roles</option>
               <option value="STUDENT">Student</option>
-              <option value="GROUP_LEADER">Group Leader</option>
               <option value="ADMIN">Admin</option>
             </select>
           <select aria-label="Filter by status" value={status} onChange={(event) => setStatus(event.target.value)}>
@@ -263,6 +262,12 @@ export default function UsersView() {
             <option value="SUSPENDED">Suspended</option>
             <option value="PENDING_VERIFICATION">Pending verification</option>
             <option value="DEACTIVATED">Deactivated</option>
+          </select>
+          <select aria-label="Filter by registration number" value={registrationNumberStatus} onChange={(event) => setRegistrationNumberStatus(event.target.value)}>
+            <option value="">All registration numbers</option>
+            <option value="ASSIGNED">Assigned</option>
+            <option value="PENDING">Pending assignment</option>
+            <option value="UNVERIFIED">Pending verification</option>
           </select>
           <button className="admin-btn admin-btn-primary" type="submit">Search</button>
           <button className="admin-btn admin-btn-ghost" type="button" onClick={resetFilters}>Reset</button>
@@ -280,6 +285,7 @@ export default function UsersView() {
               <thead>
                 <tr>
                   <th>User</th>
+                  <th>University identifier</th>
                   <th>Role</th>
                   <th>Status</th>
                   <th>Groups</th>
@@ -295,20 +301,13 @@ export default function UsersView() {
                       <small className="admin-muted">{user.email}</small>
                     </td>
                     <td>
-                      {user.role === "ADMIN" ? (
-                        <span className="admin-badge admin-badge-admin">{labelFor("role", user.role)}</span>
-                      ) : (
-                        <select
-                          className="admin-select-inline"
-                          aria-label={`Change role for ${user.email}`}
-                          value={user.role}
-                          disabled={busyUser === `role:${user.id}`}
-                          onChange={(event) => changeRole(user, event.target.value)}
-                        >
-                          <option value="STUDENT">Student</option>
-                          <option value="GROUP_LEADER">Group Leader</option>
-                        </select>
-                      )}
+                      <span>{user.role === "STUDENT" ? (user.student_number || "Pending assignment") : (user.staff_identifier || "—")}</span>
+                      {user.role === "STUDENT" && user.student_number && <small className="admin-muted">{user.registration_number_verified_at ? "Verified" : "Pending verification"}</small>}
+                    </td>
+                    <td>
+                      <span className={`admin-badge admin-badge-${user.role.toLowerCase()}`}>
+                        {labelFor("role", user.role)}
+                      </span>
                     </td>
                     <td>
                       <span className={`admin-badge admin-badge-${user.status.toLowerCase()}`}>
@@ -473,8 +472,34 @@ export default function UsersView() {
               <span>Year of study</span>
               <input type="number" min="1" max="10" value={editForm.yearOfStudy} onChange={(event) => setEditForm((current) => ({ ...current, yearOfStudy: event.target.value }))} />
             </label>
+            {editTarget?.role === "STUDENT" && (
+              <>
+                <label className="admin-field">
+                  <span>Registration number</span>
+                  <input value={editForm.registrationNumber} onChange={(event) => setEditForm((current) => ({ ...current, registrationNumber: event.target.value }))} placeholder="e.g. BBICTR/2024/44711" />
+                </label>
+                <label className="admin-field">
+                  <span>Admission year</span>
+                  <input type="number" min="1900" max={new Date().getFullYear() + 1} value={editForm.admissionYear} onChange={(event) => setEditForm((current) => ({ ...current, admissionYear: event.target.value }))} />
+                </label>
+                <label className="admin-field">
+                  <span>Current semester</span>
+                  <input maxLength={40} value={editForm.currentSemester} onChange={(event) => setEditForm((current) => ({ ...current, currentSemester: event.target.value }))} placeholder="e.g. Semester 1" />
+                </label>
+                <label className="admin-field admin-checkbox-field">
+                  <span>Verification</span>
+                  <span><input type="checkbox" checked={editForm.registrationNumberVerified} onChange={(event) => setEditForm((current) => ({ ...current, registrationNumberVerified: event.target.checked }))} /> Mark registration number as verified</span>
+                </label>
+              </>
+            )}
+            {editTarget?.role === "ADMIN" && (
+              <label className="admin-field">
+                <span>Staff identifier</span>
+                <input value={editForm.staffIdentifier} onChange={(event) => setEditForm((current) => ({ ...current, staffIdentifier: event.target.value }))} placeholder="Optional institutional staff ID" />
+              </label>
+            )}
             <p className="admin-muted" style={{ gridColumn: "1 / -1" }}>
-              Changing an email address resets verification and revokes the user&apos;s active sessions.
+              Changing an email address resets verification and revokes the user&apos;s active sessions. Registration-number changes are recorded in the audit log.
             </p>
           </div>
         )}

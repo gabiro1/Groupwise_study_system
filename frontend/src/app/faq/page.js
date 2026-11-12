@@ -25,7 +25,7 @@ const questions = [
   },
   {
     question: "Can I create or manage a group study plan?",
-    answer: "Group workspaces support shared plans, tasks, sessions, messages, and progress. Access depends on your membership in the study group.",
+    answer: "Study groups support shared plans, tasks, sessions, messages, and progress. Access depends on your membership in the study group.",
   },
   {
     question: "I can’t find my course or have an account issue. What should I do?",

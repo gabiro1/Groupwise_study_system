@@ -5,7 +5,6 @@ import {
   parseStudyIntent,
   fetchRecommendations,
   recordRecommendationOutcome,
-  sendPartnerRequest,
 } from "./aiClient";
 
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -22,10 +21,6 @@ function formatSlot(slot) {
   return `${day} ${time(start)}–${time(end)}`;
 }
 
-function fullName(item) {
-  return [item.firstName, item.lastName].filter(Boolean).join(" ") || "A study partner";
-}
-
 function algorithmLabel(value) {
   return {
     WEIGHTED_SCORING: "Weighted scoring",
@@ -36,14 +31,14 @@ function algorithmLabel(value) {
 }
 
 /**
- * Natural-language search for a "perfect" group or partner.
+ * Natural-language search for a suitable study group.
  *
  * The model only parses the sentence into filters. Ranking stays deterministic:
  * the parsed filters are shown to the student as removable chips, then handed to
  * the existing recommendation engine. When no provider is configured the panel
  * stays visible but explains that AI search is off, rather than failing.
  */
-export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, heading, blurb }) {
+export default function AiMatchSearch({ onJoin, onNotice, heading, blurb }) {
   const [text, setText] = useState("");
   const [parsing, setParsing] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -55,7 +50,6 @@ export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, headin
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
   const [busyId, setBusyId] = useState("");
-  const [requestedIds, setRequestedIds] = useState([]);
   const [modelMeta, setModelMeta] = useState(null);
   const shownIds = useRef(new Set());
 
@@ -70,11 +64,8 @@ export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, headin
     }
   }, [loading, results, searched]);
 
-  const isStudent = kind === "STUDENT";
-  const title = heading || (isStudent ? "Find your ideal study partner" : "Find your ideal study group");
-  const copy = blurb || (isStudent
-    ? "Describe who you want to study with — courses, topics, times — and we’ll rank the best matches."
-    : "Describe what you want to study and when, and we’ll rank the best-fitting groups.");
+  const title = heading || "Find your ideal study group";
+  const copy = blurb || "Describe what you want to study and when, and we’ll rank the best-fitting groups.";
 
   const courseLabels = new Map((eligible?.courses || []).map((c) => [c.id, `${c.courseCode} · ${c.name}`]));
   const topicLabels = new Map((eligible?.topics || []).map((t) => [t.id, `${t.courseCode} · ${t.name}`]));
@@ -91,7 +82,7 @@ export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, headin
   function buildPayload(intent, overrides = {}) {
     const merged = { ...intent, ...overrides };
     return {
-      kind,
+      kind: "GROUP",
       courseId: merged.courseIds?.[0] ?? null,
       topicIds: merged.topicIds ?? [],
       goalId: merged.goalId ?? null,
@@ -174,28 +165,12 @@ export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, headin
       const result = await onJoin({
         id: recommendation.groupId,
         name: recommendation.name,
-        workspaceId: recommendation.workspaceId,
         recommendationId: recommendation.recommendationId,
       });
       if (result?.status === "JOINED" || result?.status === "REQUESTED") {
         setResults((current) => current.filter((item) => item.recommendationId !== recommendation.recommendationId));
         notify(result.status === "JOINED" ? "You’ve joined the study group." : "Your request to join was sent.");
       }
-    } catch (requestError) {
-      setError(requestError.message);
-    } finally {
-      setBusyId("");
-    }
-  }
-
-  async function requestPartner(recommendation) {
-    setBusyId(recommendation.recommendationId);
-    setError("");
-    try {
-      await recordRecommendationOutcome(recommendation.recommendationId, "CLICKED");
-      await sendPartnerRequest(recommendation.studentId, recommendation.recommendationId);
-      setRequestedIds((current) => [...current, recommendation.studentId]);
-      notify("Partner request sent. They can accept it on their Study partners page.");
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -227,19 +202,17 @@ export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, headin
       </div>
 
       <form className="ai-match-form" onSubmit={submitSearch}>
-        <label className="sr-only" htmlFor={`ai-match-${kind}`}>Describe your ideal {isStudent ? "partner" : "group"}</label>
+        <label className="sr-only" htmlFor="ai-match-GROUP">Describe your ideal study group</label>
         <textarea
-          id={`ai-match-${kind}`}
+          id="ai-match-GROUP"
           rows={2}
           maxLength={1000}
           value={text}
           onChange={(event) => setText(event.target.value)}
-          placeholder={isStudent
-            ? "e.g. Someone strong in linear algebra who’s free Tuesday evenings and prefers online"
-            : "e.g. A small calculus group that meets Wednesday afternoons on campus"}
+          placeholder="e.g. A small calculus group that meets Wednesday afternoons on campus"
         />
         <button className="button button-primary" type="submit" disabled={busy || text.trim().length < 3}>
-          {parsing ? "Understanding…" : loading ? "Finding matches…" : isStudent ? "Find partners" : "Find groups"}
+          {parsing ? "Understanding…" : loading ? "Finding matches…" : "Find groups"}
         </button>
       </form>
 
@@ -297,7 +270,7 @@ export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, headin
       {note && <div className="feature-success" role="status">{note}</div>}
       {modelMeta && searched && <p className="admin-muted">Ranking source: {algorithmLabel(modelMeta.algorithm)}{modelMeta.degraded ? " · weighted fallback active" : ""}</p>}
 
-      {loading && <p className="empty-state" role="status">{isStudent ? "Ranking students who complement your learning…" : "Ranking groups that fit your request…"}</p>}
+      {loading && <p className="empty-state" role="status">Ranking groups that fit your request…</p>}
 
       {!loading && searched && results.length === 0 && !error && (
         <p className="empty-state">
@@ -308,42 +281,6 @@ export default function AiMatchSearch({ kind = "GROUP", onJoin, onNotice, headin
       <div className="ai-match-results">
         {results.map((item) => {
           const itemBusy = busyId === item.recommendationId;
-          if (isStudent) {
-            const requested = requestedIds.includes(item.studentId);
-            return (
-              <article className="panel recommendation-card" key={item.recommendationId || item.studentId}>
-                <div className="recommendation-card-top">
-                  <div>
-                    <span className="section-overline">
-                      {item.yearOfStudy ? `${item.yearOfStudy}${["st", "nd", "rd", "th"][Math.min(item.yearOfStudy - 1, 3)]} year · ` : ""}
-                      {item.sharedCourses} shared {item.sharedCourses === 1 ? "course" : "courses"}
-                    </span>
-                    <h2>{fullName(item)}</h2>
-                  </div>
-                  <span className="match-score" aria-label={`${Math.round(item.score)} percent match`}>
-                   <strong>{Math.round(item.score)}%</strong><small>{item.label}</small>
-                  </span>
-                </div>
-                {item.baselineScore != null && item.algorithm !== "WEIGHTED_SCORING" && <small className="admin-muted">Baseline weighted score: {Math.round(item.baselineScore)}%</small>}
-                <div className="recommendation-reasons">
-                  <strong>Why this partner?</strong>
-                  {item.reasons?.length
-                    ? <ul>{item.reasons.slice(0, 3).map((reason, index) => <li key={`${reason.type}-${index}`}>{reasonText(reason)}</li>)}</ul>
-                    : <p>{item.confidenceNote || "This student matches your learning profile."}</p>}
-                </div>
-                {item.warnings?.length > 0 && (
-                  <p className="recommendation-caveat">{item.warnings.map(reasonText).filter(Boolean).join(" ")}</p>
-                )}
-                <div className="recommendation-actions">
-                  <button className="button button-primary" type="button" disabled={itemBusy || requested} onClick={() => requestPartner(item)}>
-                    {itemBusy ? "Sending…" : requested ? "Request sent" : "Send partner request"}
-                  </button>
-                  <button className="recommendation-dismiss" type="button" disabled={itemBusy || requested} onClick={() => dismiss(item)}>Not for me</button>
-                </div>
-                {requested && <p className="recommendation-thanks" role="status">Request sent. They can accept it on their Study partners page.</p>}
-              </article>
-            );
-          }
           return (
             <article className="panel recommendation-card" key={item.recommendationId || item.groupId}>
               <div className="recommendation-card-top">

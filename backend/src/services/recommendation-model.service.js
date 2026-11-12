@@ -51,7 +51,7 @@ function readinessResult(counts) {
     check("labelled_candidate_rows", counts.labelled_candidate_rows, required.rows),
     check("positive_outcomes", counts.positive_outcomes, required.positives),
     check("negative_outcomes", counts.negative_outcomes, required.negatives),
-    check("groups_or_partner_interactions", counts.interactions, required.interactions),
+    check("group_interactions", counts.interactions, required.interactions),
     check("courses_represented", counts.courses, required.courses),
     check("label_diversity", counts.label_diversity, required.labels),
   ];
@@ -89,7 +89,7 @@ export async function getDataReadiness({ force = false } = {}) {
                count(DISTINCT r.id) FILTER (WHERE r.accepted_at IS NOT NULL OR rf.helpful = TRUE
                                                OR mo.recommendation_id IS NOT NULL)::int AS positive_outcomes,
                count(DISTINCT r.id) FILTER (WHERE r.rejected_at IS NOT NULL OR rf.helpful = FALSE)::int AS negative_outcomes,
-              count(DISTINCT COALESCE(r.target_workspace_id::text, r.target_student_id::text))::int AS interactions,
+               count(DISTINCT r.target_group_id::text)::int AS interactions,
               count(DISTINCT COALESCE(rr.course_id::text, course_ids.course_id))::int AS courses,
               count(DISTINCT CASE
                 WHEN r.rejected_at IS NOT NULL OR rf.helpful = FALSE THEN 0

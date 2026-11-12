@@ -33,7 +33,7 @@ const router = Router();
  *
  * Authorisation is re-derived on every request from the session's group
  * membership (see services/studySession.service.js). Admin has no implicit
- * access: sessions live inside a group, exactly like workspaces.
+ * access: sessions live inside a group.
  *
  * All routes sit behind `requireAuth` + `requireStudent`, so these endpoints
  * are student-facing only.

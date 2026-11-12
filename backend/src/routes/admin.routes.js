@@ -161,17 +161,15 @@ async function resolveReportTarget(reporterId, targetType, targetId) {
   }
 
   if (targetType === "MESSAGE") {
-    // Both workspace/session messages and direct messages use the public report
-    // target vocabulary. The access predicates intentionally return no row for
-    // a conversation the reporter cannot read.
+    // Group/session messages use the public report target vocabulary. The access
+    // predicates intentionally return no row for a conversation the reporter
+    // cannot read.
     const row = await queryOne(
-      `SELECT m.id, 'WORKSPACE' AS source
-         FROM messages m
-         LEFT JOIN study_sessions ss ON ss.id = m.session_id
-         JOIN workspaces w ON w.id = COALESCE(m.workspace_id, ss.workspace_id)
-         JOIN workspace_groups wg ON wg.workspace_id = w.id
-         JOIN study_groups g ON g.id = wg.group_id AND g.status = 'ACTIVE'
-        WHERE m.id = $1 AND m.deleted_at IS NULL AND w.is_archived = FALSE AND g.status = 'ACTIVE'
+       `SELECT m.id, 'GROUP' AS source
+          FROM messages m
+          LEFT JOIN study_sessions ss ON ss.id = m.session_id
+          JOIN study_groups g ON g.id = m.group_id AND g.status = 'ACTIVE'
+         WHERE m.id = $1 AND m.deleted_at IS NULL
           AND EXISTS (
             SELECT 1 FROM study_group_members gm
              WHERE gm.group_id = g.id AND gm.student_id = $2
@@ -191,12 +189,7 @@ async function resolveReportTarget(reporterId, targetType, targetId) {
                  AND gm.role IN ('OWNER', 'MODERATOR')
             )
           )
-       UNION ALL
-       SELECT dm.id, 'DIRECT' AS source
-         FROM direct_messages dm
-         JOIN direct_conversation_members cm ON cm.conversation_id = dm.conversation_id
-        WHERE dm.id = $1 AND dm.deleted_at IS NULL AND cm.user_id = $2
-        LIMIT 1`,
+       LIMIT 1`,
       [targetId, reporterId],
       "admin:reportMessageTarget",
     );
@@ -205,27 +198,25 @@ async function resolveReportTarget(reporterId, targetType, targetId) {
 
   if (targetType === "RESOURCE") {
     const row = await queryOne(
-      `SELECT 1
-         FROM resources r
-         LEFT JOIN workspaces w ON w.id = r.workspace_id
-        WHERE r.id = $1 AND r.is_deleted = FALSE
-          AND (
-            (
-               r.workspace_id IS NOT NULL
-               AND w.is_archived = FALSE
+       `SELECT 1
+          FROM resources r
+          LEFT JOIN study_groups g ON g.id = r.group_id AND g.status = 'ACTIVE'
+         WHERE r.id = $1 AND r.is_deleted = FALSE
+           AND (
+             (
+               r.group_id IS NOT NULL
+               AND g.id IS NOT NULL
                AND EXISTS (
-                SELECT 1
-                  FROM workspace_groups wg
-                  JOIN study_groups g ON g.id = wg.group_id AND g.status = 'ACTIVE'
-                  JOIN study_group_members m ON m.group_id = g.id
-                 WHERE wg.workspace_id = r.workspace_id AND m.student_id = $2
-                   AND m.left_at IS NULL AND m.status = 'ACTIVE'
-              )
-              AND (r.visibility <> 'PRIVATE' OR r.uploaded_by = $2)
-            )
-             OR (
-               r.workspace_id IS NULL
-               AND r.course_id IS NOT NULL
+                 SELECT 1
+                   FROM study_group_members m
+                  WHERE m.group_id = r.group_id AND m.student_id = $2
+                    AND m.left_at IS NULL AND m.status = 'ACTIVE'
+               )
+               AND (r.visibility <> 'PRIVATE' OR r.uploaded_by = $2)
+             )
+              OR (
+                r.group_id IS NULL
+                AND r.course_id IS NOT NULL
                 AND EXISTS (
                   SELECT 1 FROM student_courses sc
                   WHERE sc.course_id = r.course_id AND sc.student_id = $2 AND sc.is_active
@@ -271,6 +262,11 @@ router.get(
     if (filters.role) clauses.push(`r.key = ${bind(filters.role)}`);
     if (filters.status) clauses.push(`u.status = ${bind(filters.status)}`);
     if (filters.universityId) clauses.push(`sp.university_id = ${bind(filters.universityId)}`);
+    if (filters.registrationNumberStatus === "ASSIGNED") clauses.push("sp.student_number IS NOT NULL");
+    if (filters.registrationNumberStatus === "PENDING") clauses.push("sp.student_number IS NULL");
+    if (filters.registrationNumberStatus === "UNVERIFIED") {
+      clauses.push("sp.student_number IS NOT NULL AND sp.registration_number_verified_at IS NULL");
+    }
     if (filters.courseId) {
       clauses.push(
         `EXISTS (SELECT 1 FROM student_courses sc WHERE sc.student_id = u.id AND sc.course_id = ${bind(filters.courseId)})`,
@@ -278,14 +274,15 @@ router.get(
     }
     if (filters.q) {
       clauses.push(
-        `(concat(u.first_name, ' ', u.last_name) ILIKE '%' || ${bind(filters.q)} || '%' OR u.email ILIKE '%' || ${bind(filters.q)} || '%')`,
+        `(concat(u.first_name, ' ', u.last_name) ILIKE '%' || ${bind(filters.q)} || '%' OR u.email ILIKE '%' || ${bind(filters.q)} || '%' OR sp.student_number ILIKE '%' || ${bind(filters.q)} || '%' OR u.staff_identifier ILIKE '%' || ${bind(filters.q)} || '%')`,
       );
     }
 
     const rows = await queryRows(
-      `SELECT u.id, u.email, u.first_name, u.last_name, u.status, r.key AS role,
-              u.email_verified_at, u.last_login_at, u.created_at, u.suspended_at, u.suspension_reason,
-              sp.onboarding_step, sp.onboarding_done, sp.university_id,
+        `SELECT u.id, u.email, u.staff_identifier, u.first_name, u.last_name, u.status, r.key AS role,
+               u.email_verified_at, u.last_login_at, u.created_at, u.suspended_at, u.suspension_reason,
+               sp.onboarding_step, sp.onboarding_done, sp.university_id, sp.student_number,
+               sp.admission_year, sp.current_semester, sp.registration_number_verified_at,
               (SELECT count(*)::int FROM study_group_members m
                  WHERE m.student_id = u.id AND m.left_at IS NULL AND m.status = 'ACTIVE') AS group_count
          FROM users u
@@ -311,9 +308,9 @@ router.get(
 /**
  * POST /api/admin/users/role
  *
- * Role changes are one-directional by policy: an admin may grant GROUP_LEADER or
- * STUDENT, but never ADMIN, and never to another admin. Granting admin rights
- * should be a deliberate, out-of-band operation.
+ * Role changes are one-directional by policy: an admin may demote a non-admin to
+ * STUDENT, but never grant ADMIN through this endpoint. Group leadership is a
+ * membership permission, not an account role.
  */
 router.post(
   "/users/role",
@@ -341,27 +338,6 @@ router.post(
 
     if (target.role === role) {
       throw new ConflictError(`That user is already a ${role.toLowerCase()}.`);
-    }
-
-    // A group leader is only a leader while they actually lead a group. Demoting
-    // them while memberships still say OWNER/MODERATOR would desynchronise the
-    // role from the memberships that justify it.
-    if (target.role === "GROUP_LEADER" && role === "STUDENT") {
-      const leading = await queryOne(
-        `SELECT count(*)::int AS groups
-           FROM study_group_members m JOIN study_groups g ON g.id = m.group_id
-          WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
-            AND m.role IN ('OWNER', 'MODERATOR') AND g.status = 'ACTIVE'`,
-        [userId],
-        "admin:leaderGroups",
-      );
-
-      if (leading.groups > 0) {
-        throw new ConflictError("That user still leads active groups. Remove them as a leader first.", {
-          code: "STILL_LEADING",
-          details: { groups: leading.groups },
-        });
-      }
     }
 
     const roleRow = await queryOne("SELECT id FROM roles WHERE key = $1", [role], "admin:role");
@@ -612,16 +588,7 @@ router.post(
               "admin:removeResource",
             );
 
-        // Direct messages share the report vocabulary with workspace messages.
-        // Only try that table when the workspace-message update found nothing.
-        const directMessage = report.target_type === "MESSAGE" && affected.rowCount === 0
-          ? await tx.query(
-              "UPDATE direct_messages SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
-              [report.target_id],
-              "admin:removeDirectMessage",
-            )
-          : { rowCount: 0 };
-        targetAffected = (affected.rowCount ?? 0) + (directMessage.rowCount ?? 0);
+        targetAffected = affected.rowCount ?? 0;
         if (targetAffected !== 1) {
           throw new ConflictError("The reported content is no longer available.", {
             code: "REPORT_TARGET_UNAVAILABLE",
@@ -641,15 +608,7 @@ router.post(
         if ((affected.rowCount ?? 0) !== 1) {
           throw new ConflictError("The reported group is already closed.", { code: "REPORT_TARGET_UNAVAILABLE" });
         }
-        await tx.query(
-          `UPDATE workspaces
-              SET is_archived = TRUE, archived_at = now()
-            WHERE id IN (SELECT workspace_id FROM workspace_groups WHERE group_id = $1)
-              AND NOT is_archived`,
-          [report.target_id],
-          "admin:archiveReportedWorkspaces",
-        );
-        await tx.query(
+         await tx.query(
           "UPDATE study_group_invitations SET status = 'CANCELLED' WHERE group_id = $1 AND status = 'PENDING'",
           [report.target_id],
           "admin:cancelReportedInvitations",
@@ -927,6 +886,7 @@ function buildAcceptanceTrend(range, rows) {
  * label them honestly:
  *   - activeAccounts   = status ACTIVE (an enabled account, not "recently online")
  *   - totalMemberships = live, confirmed memberships (pending requests excluded)
+ *   - totalContentItems = active-group plans, tasks, resources and messages
  *   - sessionsThisMonth = non-cancelled sessions starting in the current calendar month
  *   - acceptanceRate   = recommendations accepted / recommendations shown
  */
@@ -952,17 +912,41 @@ router.get(
           `SELECT
              (SELECT count(*)::int FROM users u JOIN roles r ON r.id = u.role_id
                WHERE r.key = 'STUDENT' AND u.deleted_at IS NULL)                       AS total_students,
-             (SELECT count(*)::int FROM users u JOIN roles r ON r.id = u.role_id
-               WHERE r.key = 'GROUP_LEADER' AND u.deleted_at IS NULL)                  AS total_group_leaders,
+             (SELECT count(DISTINCT m.student_id)::int
+                FROM study_group_members m
+                JOIN study_groups g ON g.id = m.group_id AND g.status = 'ACTIVE'
+               WHERE m.left_at IS NULL AND m.status = 'ACTIVE'
+                 AND m.role IN ('OWNER', 'MODERATOR'))                       AS total_group_leaders,
              (SELECT count(*)::int FROM users WHERE status = 'ACTIVE' AND deleted_at IS NULL)        AS active_accounts,
              (SELECT count(*)::int FROM users WHERE status = 'SUSPENDED' AND deleted_at IS NULL)     AS suspended_accounts,
              (SELECT count(*)::int FROM users WHERE status = 'DEACTIVATED' AND deleted_at IS NULL)   AS deactivated_accounts,
              (SELECT count(*)::int FROM users WHERE status = 'PENDING_VERIFICATION' AND deleted_at IS NULL) AS pending_accounts,
-             (SELECT count(*)::int FROM study_groups)                                 AS total_groups,
-             (SELECT count(*)::int FROM study_groups WHERE status = 'ACTIVE')         AS active_groups,
-             (SELECT count(*)::int FROM workspaces WHERE NOT is_archived)             AS total_workspaces,
-             (SELECT count(*)::int FROM study_group_members
-               WHERE left_at IS NULL AND status = 'ACTIVE')                           AS total_memberships,
+              (SELECT count(*)::int FROM study_groups)                                 AS total_groups,
+              (SELECT count(*)::int FROM study_groups WHERE status = 'ACTIVE')         AS active_groups,
+              (SELECT count(*)::int
+                 FROM (
+                   SELECT p.id
+                     FROM study_plans p
+                     JOIN study_groups g ON g.id = p.group_id AND g.status = 'ACTIVE'
+                   UNION ALL
+                   SELECT t.id
+                     FROM tasks t
+                     JOIN study_groups g ON g.id = t.group_id AND g.status = 'ACTIVE'
+                   UNION ALL
+                   SELECT resource_row.id
+                     FROM resources resource_row
+                     JOIN study_groups resource_group ON resource_group.id = resource_row.group_id
+                       AND resource_group.status = 'ACTIVE'
+                    WHERE NOT resource_row.is_deleted
+                   UNION ALL
+                   SELECT message_row.id
+                     FROM messages message_row
+                     JOIN study_groups message_group ON message_group.id = message_row.group_id
+                       AND message_group.status = 'ACTIVE'
+                    WHERE message_row.deleted_at IS NULL
+                 ) AS group_content)                                               AS total_content_items,
+              (SELECT count(*)::int FROM study_group_members
+                WHERE left_at IS NULL AND status = 'ACTIVE')                           AS total_memberships,
              (SELECT count(*)::int FROM reports WHERE status IN ('OPEN', 'IN_REVIEW')) AS pending_reports,
              (SELECT count(*)::int FROM study_sessions
                WHERE status = 'SCHEDULED' AND starts_at >= now())                      AS upcoming_sessions,
@@ -1069,10 +1053,10 @@ router.get(
         totalGroupLeaders: counts.total_group_leaders,
         activeAccounts: counts.active_accounts,
         suspendedAccounts: counts.suspended_accounts,
-        totalGroups: counts.total_groups,
-        activeGroups: counts.active_groups,
-        totalWorkspaces: counts.total_workspaces,
-        totalMemberships: counts.total_memberships,
+         totalGroups: counts.total_groups,
+         activeGroups: counts.active_groups,
+         totalContentItems: counts.total_content_items,
+         totalMemberships: counts.total_memberships,
         pendingReports: counts.pending_reports,
         upcomingSessions: counts.upcoming_sessions,
         recentRegistrations: counts.recent_registrations,

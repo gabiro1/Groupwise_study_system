@@ -42,7 +42,7 @@ import {
  *
  * Natural language is parsed into a structured requirement set, and from that
  * point on everything is deterministic arithmetic. The score is reproducible,
- * explainable, and identical on every run — which is also what makes the
+ * explainable, and identical on every run â€” which is also what makes the
  * research component possible.
  *
  * When the AI parser is unavailable, `degraded` is set and the request is served
@@ -134,8 +134,7 @@ export async function generate(studentId, input) {
     );
   }
 
-  const candidates =
-    input.kind === "GROUP" ? await loadGroupCandidates(requirements, input) : await loadStudentCandidates(requirements, input);
+  const candidates = await loadGroupCandidates(requirements, input);
 
   const [dataReadiness, artifact, runtime, personalizationProfile] = await Promise.all([
     getDataReadiness(),
@@ -292,11 +291,11 @@ export async function generate(studentId, input) {
       // each, this endpoint would otherwise spend most of its latency waiting on
       // the database.
       //
-      // Every row has the same 18 bound values, so the value array and the placeholder
-      // count are derived from one constant — if they drift apart, Postgres
+      // Every row has the same 17 bound values, so the value array and the placeholder
+      // count are derived from one constant â€” if they drift apart, Postgres
       // reports a parameter count mismatch immediately rather than silently
       // binding the wrong values to the wrong columns.
-      const COLUMNS_PER_ROW = 18;
+      const COLUMNS_PER_ROW = 16;
       const isGroup = input.kind === "GROUP";
 
       const values = [];
@@ -306,10 +305,7 @@ export async function generate(studentId, input) {
           requestId,
           studentId,
           input.kind,
-           // Exactly one target is set; the table's CHECK constraint enforces it.
-           isGroup ? null : entry.candidate.id,
-           isGroup ? entry.candidate.workspace_id : null,
-           isGroup ? entry.candidate.id : null,
+          entry.candidate.id,
            index + 1,
           entry.score,
           JSON.stringify(entry.breakdown),
@@ -329,7 +325,7 @@ export async function generate(studentId, input) {
 
       const insertSql = [
         "INSERT INTO recommendations",
-        "  (request_id, student_id, kind, target_student_id, target_workspace_id, target_group_id, rank, score,",
+        "  (request_id, student_id, kind, target_group_id, rank, score,",
         "   score_breakdown, similarity_score, complementarity_score, complementary_topics,",
         "   overlapping_topics, explanation, confidence, baseline_score,",
         "   personalization_adjustment, feature_values)",
@@ -374,7 +370,7 @@ export async function generate(studentId, input) {
       confidence: entry.confidence,
       confidenceNote:
         entry.confidence < LOW_CONFIDENCE_FLOOR
-          ? "Based on limited profile data — add availability and topic ratings to sharpen this."
+          ? "Based on limited profile data â€” add availability and topic ratings to sharpen this."
           : null,
     })),
   };
@@ -412,7 +408,7 @@ async function resolveRequirements(studentId, input) {
       min_group_size: input.minGroupSize ?? profile?.preferences?.min_group_size,
       max_group_size: input.maxGroupSize ?? profile?.preferences?.max_group_size,
       session_minutes: profile?.preferences?.session_minutes,
-      partner_preferences: profile?.preferences?.partner_preferences ?? null,
+      collaboration_preferences: profile?.preferences?.collaboration_preferences ?? null,
     },
     programmeId: profile?.programmeId ?? null,
     profileFieldCount: profile?.profileFieldCount ?? 0,
@@ -464,7 +460,7 @@ async function loadStudentProfile(studentId) {
       "recs:profileAvailability",
     ),
     queryOne(
-      `SELECT preferred_mode, preferred_style, min_group_size, max_group_size, session_minutes, partner_preferences
+      `SELECT preferred_mode, preferred_style, min_group_size, max_group_size, session_minutes, collaboration_preferences
          FROM study_preferences WHERE student_id = $1`,
       [studentId],
       "recs:profilePrefs",
@@ -498,7 +494,7 @@ async function loadStudentProfile(studentId) {
 /**
  * Candidate groups.
  *
- * Groups the student already belongs to are excluded — recommending somewhere
+ * Groups the student already belongs to are excluded â€” recommending somewhere
  * you already are is noise, not a feature.
  */
 async function loadGroupCandidates(requirements, input) {
@@ -540,23 +536,12 @@ async function loadGroupCandidates(requirements, input) {
             g.location_hint, g.course_id, g.goal_id,
             c.course_code, c.name AS course_name,
             lg.code AS goal_code, lg.label AS goal_label,
-            w.id AS workspace_id,
             EXTRACT(EPOCH FROM (now() - g.created_at)) / 86400 AS age_days,
             (SELECT max(created_at) FROM group_activity_events e WHERE e.group_id = g.id) AS last_event_at
        FROM study_groups g
-       JOIN courses c ON c.id = g.course_id
-         LEFT JOIN learning_goals lg ON lg.id = g.goal_id
-         LEFT JOIN LATERAL (
-          SELECT w.id, w.created_at AS workspace_created_at FROM workspaces w
-           WHERE NOT w.is_archived
-             AND (w.group_id = g.id OR EXISTS (
-               SELECT 1 FROM workspace_groups wg
-                WHERE wg.workspace_id = w.id AND wg.group_id = g.id
-             ))
-           ORDER BY w.created_at DESC
-           LIMIT 1
-         ) w ON TRUE
-       WHERE ${clauses.join(" AND ")} AND w.id IS NOT NULL
+        JOIN courses c ON c.id = g.course_id
+          LEFT JOIN learning_goals lg ON lg.id = g.goal_id
+        WHERE ${clauses.join(" AND ")}
        ORDER BY g.activity_score DESC, g.created_at DESC
        LIMIT 200`,
     params,
@@ -619,129 +604,8 @@ async function loadGroupCandidates(requirements, input) {
   }));
 }
 
-/** Candidate students, respecting discoverability. */
-async function loadStudentCandidates(requirements, input) {
-  const params = [];
-  const bind = (value) => {
-    params.push(value);
-    return `$${params.length}`;
-  };
-
-  const clauses = [
-    `u.id <> ${bind(requirements.studentId)}`,
-    "u.deleted_at IS NULL",
-    "u.status = 'ACTIVE'",
-    "COALESCE(ps.discoverable, TRUE) = TRUE",
-    "COALESCE(ps.profile_visibility, 'STUDENTS') <> 'PRIVATE'",
-  ];
-
-  if (requirements.courseIds.size) {
-    clauses.push(
-      `EXISTS (SELECT 1 FROM student_courses sc
-                WHERE sc.student_id = u.id AND sc.is_active
-                  AND sc.course_id = ANY(${bind([...requirements.courseIds])}::uuid[]))`,
-    );
-  }
-  if (requirements.goalId) {
-    clauses.push(
-      `EXISTS (SELECT 1 FROM student_learning_goals sg
-                WHERE sg.student_id = u.id AND sg.goal_id = ${bind(requirements.goalId)})`,
-    );
-  }
-  if (requirements.topicIds.size) {
-    clauses.push(
-      `EXISTS (SELECT 1 FROM student_topics st
-                WHERE st.student_id = u.id
-                  AND st.topic_id = ANY(${bind([...requirements.topicIds])}::uuid[]))`,
-    );
-  }
-
-  const rows = await queryRows(
-    `SELECT u.id, u.first_name, u.last_name, u.avatar_url,
-            sp.university_id, sp.program_id, sp.year_of_study,
-            pref.preferred_mode, pref.preferred_style, pref.min_group_size,
-            pref.max_group_size, pref.session_minutes, pref.partner_preferences
-       FROM users u
-       JOIN student_profiles sp ON sp.user_id = u.id
-       LEFT JOIN privacy_settings ps ON ps.user_id = u.id
-       LEFT JOIN study_preferences pref ON pref.student_id = u.id
-       WHERE ${clauses.join(" AND ")}
-       ORDER BY u.id
-       LIMIT 200`,
-    params,
-    "recs:studentCandidates",
-  );
-
-  if (rows.length === 0) return [];
-
-  const ids = rows.map((row) => row.id);
-  const [courses, topics, skills, goals, availability] = await Promise.all([
-    queryRows(
-      "SELECT student_id, course_id FROM student_courses WHERE student_id = ANY($1::uuid[]) AND is_active",
-      [ids],
-      "recs:candidateCourses",
-    ),
-    queryRows(
-      `SELECT st.student_id, st.topic_id, st.status, st.self_rating, ct.name AS topic_name
-         FROM student_topics st JOIN course_topics ct ON ct.id = st.topic_id
-        WHERE st.student_id = ANY($1::uuid[])`,
-      [ids],
-      "recs:candidateTopics",
-    ),
-    queryRows(
-      "SELECT student_id, skill_id, proficiency FROM student_skills WHERE student_id = ANY($1::uuid[])",
-      [ids],
-      "recs:candidateSkills",
-    ),
-    queryRows(
-      `SELECT sg.student_id, g.code FROM student_learning_goals sg JOIN learning_goals g ON g.id = sg.goal_id
-        WHERE sg.student_id = ANY($1::uuid[]) AND sg.priority = 1`,
-      [ids],
-      "recs:candidateGoals",
-    ),
-    queryRows(
-      "SELECT student_id, day_of_week, start_minute, end_minute FROM student_availability WHERE student_id = ANY($1::uuid[])",
-      [ids],
-      "recs:candidateAvailability",
-    ),
-  ]);
-
-  const byStudent = new Map(
-    ids.map((id) => [
-      id,
-      { courseIds: new Set(), topics: new Map(), topicNames: {}, skills: new Map(), goalCode: null, availability: [] },
-    ]),
-  );
-
-  for (const row of courses) byStudent.get(row.student_id)?.courseIds.add(row.course_id);
-  for (const row of topics) {
-    const entry = byStudent.get(row.student_id);
-    entry?.topics.set(row.topic_id, { status: row.status, level: row.self_rating });
-    if (entry && row.topic_name) entry.topicNames[row.topic_id] = row.topic_name;
-  }
-  for (const row of skills) byStudent.get(row.student_id)?.skills.set(row.skill_id, row);
-  for (const row of goals) {
-    const entry = byStudent.get(row.student_id);
-    if (entry && !entry.goalCode) entry.goalCode = row.code;
-  }
-  for (const row of availability) byStudent.get(row.student_id)?.availability.push(row);
-
-  return rows.map((row) => {
-    const extra = byStudent.get(row.id);
-    return {
-      ...row,
-      courseIds: extra.courseIds,
-      topics: extra.topics,
-      topicNames: extra.topicNames,
-      skills: extra.skills,
-      goalCode: extra.goalCode,
-      availability: extra.availability,
-    };
-  });
-}
-
 /**
- * Score one candidate. Pure arithmetic — identical inputs always give the
+ * Score one candidate. Pure arithmetic â€” identical inputs always give the
  * identical score, which is what makes stored results reproducible.
  */
 export function scoreRecommendationCandidate(requirements, candidate, weights, input = {}) {
@@ -787,8 +651,8 @@ export function scoreRecommendationCandidate(requirements, candidate, weights, i
     preferences: preferences.score,
     topics,
     preferenceText: preferenceTextSimilarity(
-      requirements.preferences.partner_preferences,
-      candidate.partner_preferences,
+      requirements.preferences.collaboration_preferences,
+      candidate.collaboration_preferences,
     ) ?? undefined,
     groupSize,
     activity,
@@ -843,36 +707,20 @@ export function scoreRecommendationCandidate(requirements, candidate, weights, i
     featureSchemaVersion: RECOMMENDATION_FEATURE_SCHEMA_VERSION,
     featureValues,
     candidate,
-    payload:
-      candidate.name !== undefined
-        ? {
-            kind: "GROUP",
-            groupId: candidate.id,
-            workspaceId: candidate.workspace_id,
-            // A group can exist without a workspace if the trigger was bypassed
-            // (e.g. a manual insert during data repair). Surfacing null here is
-            // correct: the client must not offer "open workspace" for it.
-            hasWorkspace: Boolean(candidate.workspace_id),
-            slug: candidate.slug,
-            name: candidate.name,
-            description: candidate.description,
-            courseCode: candidate.course_code,
-            courseName: candidate.course_name,
-            memberCount: candidate.member_count,
-            maxSize: candidate.max_size,
-            mode: candidate.mode,
-            privacy: candidate.privacy,
-            locationHint: candidate.location_hint,
-          }
-        : {
-            kind: "STUDENT",
-            studentId: candidate.id,
-            firstName: candidate.first_name,
-            lastName: candidate.last_name,
-            avatarUrl: candidate.avatar_url,
-            yearOfStudy: candidate.year_of_study,
-            sharedCourses: sharedCourses,
-          },
+    payload: {
+      kind: "GROUP",
+      groupId: candidate.id,
+      slug: candidate.slug,
+      name: candidate.name,
+      description: candidate.description,
+      courseCode: candidate.course_code,
+      courseName: candidate.course_name,
+      memberCount: candidate.member_count,
+      maxSize: candidate.max_size,
+      mode: candidate.mode,
+      privacy: candidate.privacy,
+      locationHint: candidate.location_hint,
+    },
   };
 }
 
@@ -888,7 +736,7 @@ function describeMode(mine, theirs) {
  * Used for invitations, where the question is specific rather than a search.
  * Returns null rather than a fabricated score when either profile is too thin.
  */
-export async function pairCompatibility(studentIdA, studentIdB) {
+export async function studentCompatibility(studentIdA, studentIdB) {
   if (studentIdA === studentIdB) return null;
 
   const [a, b] = await Promise.all([loadStudentProfile(studentIdA), loadStudentProfile(studentIdB)]);
@@ -904,7 +752,7 @@ export async function pairCompatibility(studentIdA, studentIdB) {
         AND COALESCE(ps.discoverable, TRUE) = TRUE
         AND COALESCE(ps.profile_visibility, 'STUDENTS') <> 'PRIVATE'`,
     [studentIdB],
-    "recs:pairVisibility",
+    "recs:studentCompatibilityVisibility",
   );
   if (!visible) return null;
 
@@ -920,8 +768,8 @@ export async function pairCompatibility(studentIdA, studentIdB) {
     preferences: preferenceCompatibility(a.preferences, b.preferences).score,
     topics: topicSimilarity(a.topics, b.topics),
     preferenceText: preferenceTextSimilarity(
-      a.preferences?.partner_preferences,
-      b.preferences?.partner_preferences,
+      a.preferences?.collaboration_preferences,
+      b.preferences?.collaboration_preferences,
     ) ?? undefined,
   });
 
@@ -973,7 +821,7 @@ export async function recordOutcome(studentId, recommendationId, action, { reaso
             ${column} = COALESCE(${column}, now()),
             dismissed_reason = CASE WHEN $4 = 'REJECTED' THEN $3 ELSE dismissed_reason END
       WHERE id = $1 AND student_id = $2 AND accepted_at IS NULL AND rejected_at IS NULL
-      RETURNING id, kind, target_student_id, target_workspace_id, request_id`,
+      RETURNING id, kind, target_group_id, request_id`,
     [recommendationId, studentId, reason ?? null, action],
     "recs:recordOutcome",
   );
@@ -1055,7 +903,7 @@ export async function recordFeedback(studentId, recommendationId, { helpful, rea
  * One stored recommendation, with its full breakdown.
  *
  * This is what a student sees when they ask "why is this 82%?". Everything comes
- * back from the row that was persisted at ranking time — the score is not
+ * back from the row that was persisted at ranking time â€” the score is not
  * recomputed here, so the explanation cannot drift from the number that was shown.
  */
 export async function recommendationDetail(studentId, recommendationId) {
@@ -1067,14 +915,11 @@ export async function recommendationDetail(studentId, recommendationId) {
             r.shown_at, r.clicked_at, r.accepted_at, r.rejected_at, r.dismissed_reason,
              req.created_at, req.algorithm, req.serving_model_version,
              req.personalized, req.training_data_ready, req.model_degraded,
-             r.target_student_id, r.target_workspace_id, r.target_group_id,
-            u.first_name, u.last_name, u.avatar_url,
+              r.target_group_id,
             g.id AS group_id, g.name AS group_name, g.slug
        FROM recommendations r
        JOIN recommendation_requests req ON req.id = r.request_id
-       LEFT JOIN users u ON u.id = r.target_student_id
-       LEFT JOIN workspaces w ON w.id = r.target_workspace_id
-        LEFT JOIN study_groups g ON g.id = COALESCE(r.target_group_id, w.group_id)
+        LEFT JOIN study_groups g ON g.id = r.target_group_id
       WHERE r.id = $1 AND r.student_id = $2`,
     [recommendationId, studentId],
     "recs:detail",
@@ -1113,9 +958,7 @@ export async function recommendationDetail(studentId, recommendationId) {
       complementarityScore: row.complementarity_score,
       complementaryTopics: (row.complementary_topics ?? []).map((id) => ({ id, name: names.get(id) })),
       overlappingTopics: (row.overlapping_topics ?? []).map((id) => ({ id, name: names.get(id) })),
-      target: row.kind === "STUDENT"
-        ? { type: "STUDENT", studentId: row.target_student_id, name: [row.first_name, row.last_name].filter(Boolean).join(" ") }
-        : { type: "GROUP", groupId: row.group_id, workspaceId: row.target_workspace_id, name: row.group_name, slug: row.slug },
+      target: { type: "GROUP", groupId: row.group_id, name: row.group_name, slug: row.slug },
       outcome: {
         shownAt: row.shown_at,
         clickedAt: row.clicked_at,
@@ -1135,15 +978,12 @@ export async function listRecent(studentId, limit = 10) {
             r.accepted_at, r.rejected_at, r.shown_at,
             req.algorithm, req.serving_model_version AS model_version,
             req.personalized, req.model_degraded AS degraded,
-             r.target_student_id, r.target_workspace_id, r.target_group_id,
+             r.target_group_id,
             req.created_at,
-            u.first_name, u.last_name,
             g.name AS group_name, g.slug
        FROM recommendations r
        JOIN recommendation_requests req ON req.id = r.request_id
-       LEFT JOIN users u ON u.id = r.target_student_id
-       LEFT JOIN workspaces w ON w.id = r.target_workspace_id
-        LEFT JOIN study_groups g ON g.id = COALESCE(r.target_group_id, w.group_id)
+        LEFT JOIN study_groups g ON g.id = r.target_group_id
       WHERE r.student_id = $1
       ORDER BY req.created_at DESC LIMIT $2`,
     [studentId, limit],
@@ -1256,7 +1096,7 @@ export { MINIMUM_SCORE };
 
 export default {
   generate,
-  pairCompatibility,
+  studentCompatibility,
   recordOutcome,
   recordFeedback,
   listRecent,

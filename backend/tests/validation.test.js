@@ -13,6 +13,7 @@ import {
   recommendationRequestSchema,
   recommendationWeightsSchema,
   registerSchema,
+  loginSchema,
   resendVerificationSchema,
 } from "../src/lib/schemas.js";
 
@@ -151,25 +152,53 @@ describe("student registration", () => {
     lastName: "Student",
     email: "taylor@example.com",
     password: "StudyTogether2026",
+    registrationNumber: "BBICTR/2024/44711",
+    universityId: "6a457d9f-30e2-4c82-921e-1754ea5e7815",
+    facultyId: "6a457d9f-30e2-4c82-921e-1754ea5e7816",
+    departmentId: "6a457d9f-30e2-4c82-921e-1754ea5e7817",
+    programId: "6a457d9f-30e2-4c82-921e-1754ea5e7818",
+    admissionYear: 2024,
+    currentAcademicYear: 2,
+    currentSemester: "Semester 1",
     acceptTerms: true,
   };
 
-  it("allows creating an account without academic details", () => {
+  it("requires the registration number and academic identity fields", () => {
     const parsed = registerSchema.parse(requiredSignupFields);
 
-    assert.equal(parsed.universityId, undefined);
-    assert.equal(parsed.programId, undefined);
-    assert.equal(parsed.yearOfStudy, 1);
+    assert.equal(parsed.registrationNumber, "BBICTR/2024/44711");
+    assert.equal(parsed.universityId, requiredSignupFields.universityId);
+    assert.equal(parsed.programId, requiredSignupFields.programId);
+    assert.equal(parsed.yearOfStudy, 2);
   });
 
-  it("requires a university when a programme is provided", () => {
+  it("rejects a registration without a university registration number", () => {
     assert.equal(
       registerSchema.safeParse({
         ...requiredSignupFields,
-        programId: "6a457d9f-30e2-4c82-921e-1754ea5e7815",
+        registrationNumber: undefined,
       }).success,
       false,
     );
+  });
+
+  it("requires the faculty and department in the academic path", () => {
+    assert.equal(registerSchema.safeParse({ ...requiredSignupFields, facultyId: undefined }).success, false);
+    assert.equal(registerSchema.safeParse({ ...requiredSignupFields, departmentId: undefined }).success, false);
+  });
+
+  it("normalizes registration-number case and whitespace", () => {
+    const parsed = registerSchema.parse({
+      ...requiredSignupFields,
+      registrationNumber: " bbictr / 2024 / 44711 ",
+    });
+    assert.equal(parsed.registrationNumber, "BBICTR/2024/44711");
+  });
+
+  it("accepts email or registration number as the login identifier", () => {
+    assert.equal(loginSchema.safeParse({ identifier: "student@example.com", password: "x" }).success, true);
+    assert.equal(loginSchema.safeParse({ identifier: "BBICTR/2024/44711", password: "x" }).success, true);
+    assert.equal(loginSchema.safeParse({ password: "x" }).success, false);
   });
 });
 
@@ -189,6 +218,10 @@ describe("recommendation request", () => {
 
   it("rejects an unknown match kind", () => {
     assert.equal(recommendationRequestSchema.safeParse({ kind: "ALGORITHM" }).success, false);
+  });
+
+  it("rejects standalone student matching", () => {
+    assert.equal(recommendationRequestSchema.safeParse({ kind: "STUDENT" }).success, false);
   });
 });
 

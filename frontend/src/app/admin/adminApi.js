@@ -151,7 +151,6 @@ export const LABELS = {
   },
   role: {
     STUDENT: "Student",
-    GROUP_LEADER: "Group Leader",
     ADMIN: "Administrator",
   },
 };

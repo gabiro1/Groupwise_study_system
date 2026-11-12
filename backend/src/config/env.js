@@ -65,6 +65,11 @@ const schema = z.object({
   // or the single-model form { ..., model: "..." }. Targets are tried in order:
   // the primary (AI_PROVIDER) first, then each fallback model. See registry.js.
   AI_FALLBACKS: z.string().optional(),
+  // Comma-separated provider ids that should be skipped without removing their
+  // credentials. Useful for temporarily exhausted or degraded upstreams.
+  AI_DISABLED_PROVIDERS: z.string().default(""),
+  // Optional comma-separated model ids to try first within the configured chain.
+  AI_PREFERRED_MODELS: z.string().default(""),
 
   // Web research is an independent, opt-in capability. Missing keys never
   // prevent the application from starting; the registry reports it as disabled.

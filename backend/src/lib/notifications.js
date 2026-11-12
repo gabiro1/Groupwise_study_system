@@ -25,10 +25,6 @@ const THROTTLEABLE = new Set([
   NOTIFICATION_TYPE.TASK_ASSIGNED,
   NOTIFICATION_TYPE.TASK_DUE,
   NOTIFICATION_TYPE.SESSION_UPDATED,
-  // A rapid exchange of direct messages is the same conversation, not six
-  // interruptions: coalesce so the bell reflects the thread, and the thread's
-  // own unread counter does the precise bookkeeping.
-  NOTIFICATION_TYPE.DIRECT_MESSAGE,
 ]);
 
 const THROTTLE_WINDOW_MINUTES = 30;

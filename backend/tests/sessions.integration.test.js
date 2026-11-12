@@ -20,7 +20,7 @@ process.env.WRITE_RATE_LIMIT_MAX = "100000";
 process.env.LOG_LEVEL = "silent";
 
 const { createApp } = await import("../src/config/app.js");
-const { pool, query, queryOne, closePool } = await import("../src/config/db.js");
+const { pool, query, queryOne, withTransaction, closePool } = await import("../src/config/db.js");
 const { signAccessToken } = await import("../src/lib/tokens.js");
 const { hashPassword } = await import("../src/lib/crypto.js");
 const { ROLES } = await import("../src/config/constants.js");
@@ -154,23 +154,24 @@ async function groupFixture() {
   const outsider = await createUser(ROLES.STUDENT, `outsider-${n}`);
 
   const groupId = randomUUID();
-  await query(
-    `INSERT INTO study_groups (id, slug, name, course_id, description, mode, privacy, require_approval,
-                               min_size, max_size, owner_id, created_by_role)
-     VALUES ($1, $2, $3, $4, '', 'EITHER', 'PUBLIC', FALSE, 2, 6, $5, 'STUDENT')`,
-    [groupId, `sess-${RUN}-g${n}`, `Sessions ${RUN}-${n}`, await anyCourseId(), owner.id],
-    "test:createGroup",
-  );
-  createdGroupIds.push(groupId);
-
-  for (const [member, role] of [[owner, "OWNER"], [memberA, "MEMBER"], [memberB, "MEMBER"]]) {
-    await query(
-      `INSERT INTO study_group_members (id, group_id, student_id, role, status, joined_at)
-       VALUES ($1, $2, $3, $4, 'ACTIVE', now())`,
-      [randomUUID(), groupId, member.id, role],
-      "test:addMember",
+  const courseId = await anyCourseId();
+  await withTransaction(async (tx) => {
+    await tx.query(
+      `INSERT INTO study_groups (id, slug, name, course_id, description, mode, privacy, require_approval,
+                                 min_size, max_size, owner_id, created_by_role)
+       VALUES ($1, $2, $3, $4, '', 'EITHER', 'PUBLIC', FALSE, 2, 6, $5, 'STUDENT')`,
+      [groupId, `sess-${RUN}-g${n}`, `Sessions ${RUN}-${n}`, courseId, owner.id],
     );
-  }
+
+    for (const [member, role] of [[owner, "OWNER"], [memberA, "MEMBER"], [memberB, "MEMBER"]]) {
+      await tx.query(
+        `INSERT INTO study_group_members (id, group_id, student_id, role, status, joined_at)
+         VALUES ($1, $2, $3, $4, 'ACTIVE', now())`,
+        [randomUUID(), groupId, member.id, role],
+      );
+    }
+  }, "test:createGroup");
+  createdGroupIds.push(groupId);
 
   let workspace = await queryOne(
     "SELECT id FROM workspaces WHERE group_id = $1 LIMIT 1",

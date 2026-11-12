@@ -48,18 +48,19 @@ async function assertConversationAccess(studentId, conversationId) {
     `SELECT c.id, c.student_id, c.group_id, c.title, c.kind, c.status,
             c.created_at, c.updated_at
        FROM ai_conversations c
+       LEFT JOIN study_groups g ON g.id = c.group_id
       WHERE c.id = $1
         AND c.status <> 'DELETED'
         AND (
-          c.student_id = $2
-          OR (c.group_id IS NOT NULL AND EXISTS (
+          (c.group_id IS NULL AND c.student_id = $2)
+          OR (c.group_id IS NOT NULL AND g.status = 'ACTIVE' AND (c.student_id = $2 OR EXISTS (
                 SELECT 1
                   FROM study_group_members m
                  WHERE m.group_id = c.group_id
                    AND m.student_id = $2
                    AND m.left_at IS NULL
                    AND m.status = 'ACTIVE'
-              ))
+              )))
         )`,
     [conversationId, studentId],
     "ai:assertConversationAccess",
@@ -82,6 +83,19 @@ export async function createConversation({
   title,
   kind = CONVERSATION_KIND.STUDY,
 } = {}) {
+  if (groupId) {
+    const membership = await queryOne(
+      `SELECT 1
+         FROM study_group_members m
+         JOIN study_groups g ON g.id = m.group_id AND g.status = 'ACTIVE'
+        WHERE m.group_id = $1 AND m.student_id = $2
+          AND m.left_at IS NULL AND m.status = 'ACTIVE'`,
+      [groupId, studentId],
+      "ai:conversationGroupAccess",
+    );
+    if (!membership) throw new NotFoundError("That study group");
+  }
+
   const conversation = await withTransaction(async (tx) => {
     const row = await tx.queryOne(
       `INSERT INTO ai_conversations (student_id, group_id, title, kind, status)
@@ -125,17 +139,18 @@ export async function listConversations(studentId, groupId = null) {
                WHERE msg.conversation_id = c.id AND msg.deleted_at IS NULL
             ), 0) AS message_count
        FROM ai_conversations c
+       LEFT JOIN study_groups g ON g.id = c.group_id
       WHERE c.status <> 'DELETED'
         AND (
-          c.student_id = $1
-          OR (c.group_id IS NOT NULL AND EXISTS (
+          (c.group_id IS NULL AND c.student_id = $1)
+          OR (c.group_id IS NOT NULL AND g.status = 'ACTIVE' AND (c.student_id = $1 OR EXISTS (
                 SELECT 1
                   FROM study_group_members m
                  WHERE m.group_id = c.group_id
                    AND m.student_id = $1
                    AND m.left_at IS NULL
                    AND m.status = 'ACTIVE'
-              ))
+              )))
         )
         AND ($2::uuid IS NULL OR c.group_id = $2)
       ORDER BY c.updated_at DESC NULLS LAST
@@ -169,15 +184,13 @@ export async function getConversation(studentId, conversationId) {
  * transaction so list ordering stays correct without a second round trip.
  */
 export async function addMessage(studentId, conversationId, { role, content, meta = null } = {}) {
-  const messageRole = role === MESSAGE_ROLE.USER || role === MESSAGE_ROLE.ASSISTANT
-    ? role
-    : null;
-  if (!messageRole) {
-    throw new AppError("That message role is not valid.", {
-      status: 400,
-      code: "INVALID_ROLE",
+  if (role !== MESSAGE_ROLE.USER) {
+    throw new AppError("Assistant messages are written by the server.", {
+      status: 403,
+      code: "ASSISTANT_ROLE_FORBIDDEN",
     });
   }
+  const messageRole = MESSAGE_ROLE.USER;
   if (typeof content !== "string" || !content.trim()) {
     throw new AppError("A message needs some content.", {
       status: 400,

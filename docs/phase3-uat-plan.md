@@ -45,9 +45,9 @@ This sample is practical for a project validation phase but is not statistically
 |---|---|---|---|---|---|---|---|---|
 | UAT-ST-01 | Student | Register and sign in | Approved test account or new synthetic email | Open registration, complete fields, submit, sign in | Registration validation is understandable and login reaches dashboard | Pending | Pending | Pending |
 | UAT-ST-02 | Student | Complete matching profile | Signed in | Add courses, strengths, learning needs, goals, preferences and availability; save; refresh | Values save and remain visible after refresh | Pending | Pending | Pending |
-| UAT-ST-03 | Student | Find partner recommendations | Completed matching profile | Open recommendations and request partner results | Results appear in understandable ranked cards | Pending | Pending | Pending |
-| UAT-ST-04 | Student | Understand partner explanation | Partner result available | Open details and explain why the first partner was shown | Participant can describe score, reasons, and limitations in their own words | Pending | Pending | Pending |
-| UAT-ST-05 | Student | Assess partner relevance | Partner result available | Compare course, strengths/needs, goals and availability with own expectations | Participant can identify whether the result seems academically relevant | Pending | Pending | Pending |
+| UAT-ST-03 | Student | Find group recommendations | Completed matching profile | Open recommendations and review suggested groups | Results appear in understandable ranked cards | Pending | Pending | Pending |
+| UAT-ST-04 | Student | Understand group explanation | Group result available | Open details and explain why the first group was shown | Participant can describe score, reasons, and limitations in their own words | Pending | Pending | Pending |
+| UAT-ST-05 | Student | Assess group relevance | Group result available | Compare course, strengths/needs, goals and availability with the group | Participant can identify whether the result seems academically relevant | Pending | Pending | Pending |
 | UAT-ST-06 | Student | Find group recommendations | Completed matching profile and available group fixture | Open group recommendations and group details | Eligible groups are shown with capacity, visibility and join state | Pending | Pending | Pending |
 | UAT-ST-07 | Student | Request/join a group | Eligible group with request policy | Select join/request action and observe result | Request is recorded and UI state changes without falsely implying membership | Pending | Pending | Pending |
 | UAT-ST-08 | Student | Use discovery and sessions | At least one seeded group/session | Browse discovery, sessions and notifications | Pages are findable and status/permissions are understandable | Pending | Pending | Pending |
@@ -98,7 +98,7 @@ Use a five-point scale for statements: **1 Strongly disagree, 2 Disagree, 3 Neit
 
 15. I would consider studying with a recommended student.
 16. I would consider requesting or joining a recommended group.
-17. The application helped me identify potentially useful study partners.
+17. The application helped me identify potentially useful study groups.
 18. I would use this feature again for another course or learning goal.
 
 ### Open questions

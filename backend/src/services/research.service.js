@@ -64,7 +64,7 @@ const scopePredicate = (column, param) => `(${param}::uuid[] IS NULL OR ${column
 /**
  * Outcome measures for group membership.
  *
- * `group_membership_outcomes` is the spine: one row per student per workspace,
+ * `group_membership_outcomes` is the spine: one row per student per group,
  * recording how they arrived and what they then did. Everything the study needs
  * about group success is derived from it.
  */
@@ -85,8 +85,7 @@ async function outcomesByCourse({ from, to, courseIds, granularity }) {
             round(avg(o.tasks_completed)::numeric, 2) AS avg_tasks_completed,
             round(avg(o.messages_sent)::numeric, 2) AS avg_messages_sent
        FROM group_membership_outcomes o
-       JOIN workspaces w ON w.id = o.workspace_id
-       JOIN study_groups g ON g.id = w.group_id
+        JOIN study_groups g ON g.id = o.group_id
        JOIN courses c ON c.id = g.course_id
       WHERE o.joined_at >= $1::date AND o.joined_at < ($2::date + interval '1 day')
         AND ${scopePredicate("c.id", "$3")}
@@ -134,8 +133,7 @@ async function recommendationsVsOrganic({ from, to, courseIds }) {
               avg(o.tasks_completed) FILTER (WHERE o.joined_via <> 'AI_ASSISTED')::numeric, 2
             ) AS organic_avg_tasks
        FROM group_membership_outcomes o
-       JOIN workspaces w ON w.id = o.workspace_id
-       JOIN study_groups g ON g.id = w.group_id
+        JOIN study_groups g ON g.id = o.group_id
        JOIN courses c ON c.id = g.course_id
       WHERE o.joined_at >= $1::date AND o.joined_at < ($2::date + interval '1 day')
         AND ${scopePredicate("c.id", "$3")}
@@ -259,14 +257,12 @@ async function dataCoverage({ from, to, courseIds }) {
            AND ${scopePredicate("g.course_id", "$1")}) AS groups_created,
        (SELECT count(*)::int
           FROM group_membership_outcomes o
-          JOIN workspaces w ON w.id = o.workspace_id
-          JOIN study_groups g ON g.id = w.group_id
+           JOIN study_groups g ON g.id = o.group_id
          WHERE o.joined_at >= $2::date AND o.joined_at < ($3::date + interval '1 day')
            AND ${scopePredicate("g.course_id", "$1")}) AS memberships,
        (SELECT count(*)::int
           FROM group_feedback f
-          JOIN workspaces w ON w.id = f.workspace_id
-          JOIN study_groups g ON g.id = w.group_id
+           JOIN study_groups g ON g.id = f.group_id
          WHERE f.created_at >= $2::date AND f.created_at < ($3::date + interval '1 day')
            AND ${scopePredicate("g.course_id", "$1")}) AS feedback_responses,
        (SELECT count(*)::int
@@ -279,15 +275,13 @@ async function dataCoverage({ from, to, courseIds }) {
        -- A study needs both cohorts populated to compare them at all.
        (SELECT count(*)::int
           FROM group_membership_outcomes o
-          JOIN workspaces w ON w.id = o.workspace_id
-          JOIN study_groups g ON g.id = w.group_id
+           JOIN study_groups g ON g.id = o.group_id
          WHERE o.joined_via = 'AI_ASSISTED'
            AND o.joined_at >= $2::date AND o.joined_at < ($3::date + interval '1 day')
            AND ${scopePredicate("g.course_id", "$1")}) AS recommended_memberships,
        (SELECT count(*)::int
           FROM group_membership_outcomes o
-          JOIN workspaces w ON w.id = o.workspace_id
-          JOIN study_groups g ON g.id = w.group_id
+           JOIN study_groups g ON g.id = o.group_id
          WHERE o.joined_via <> 'AI_ASSISTED'
            AND o.joined_at >= $2::date AND o.joined_at < ($3::date + interval '1 day')
            AND ${scopePredicate("g.course_id", "$1")}) AS organic_memberships`,

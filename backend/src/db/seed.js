@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Seed data.
  *
  * Two layers, deliberately separated:
@@ -6,7 +6,7 @@
  * 1. **Reference data** (roles, goals, universities, courses, topics, skills, the
  *    active model version) is required for the app to work at all. It is
  *    idempotent and safe to run against any database.
- * 2. **Demo data** (accounts, a study group, a workspace with tasks and sessions) is
+ * 2. **Demo data** (accounts, a study group with group-scoped content) is
  *    only written when `SEED_DEMO_DATA=true`, because it creates real accounts with
  *    real-looking names and a known password.
  *
@@ -33,7 +33,6 @@ const DEMO_PASSWORD = "Lien!2026";
 
 const ROLES = [
   { key: "STUDENT", label: "Student", description: "Matches, joins groups, collaborates." },
-  { key: "GROUP_LEADER", label: "Group Leader", description: "Leads one or more study groups and manages their members." },
   { key: "ADMIN", label: "Administrator", description: "Platform administration and moderation." },
 ];
 
@@ -53,6 +52,7 @@ const UNIVERSITIES = [
     code: "UTM",
     country: "Malaysia",
     domain: "student.utm.edu.my",
+    active: false,
     faculties: [
       {
         name: "Faculty of Computing, Engineering and Technology",
@@ -82,6 +82,7 @@ const UNIVERSITIES = [
     code: "UM",
     country: "Malaysia",
     domain: "student.um.edu.my",
+    active: false,
     faculties: [
       {
         name: "Faculty of Computer Science and Technology",
@@ -92,6 +93,78 @@ const UNIVERSITIES = [
             code: "DCS",
             programs: [
               { name: "Bachelor of Computer Science", code: "BCS", level: "UNDERGRADUATE", years: 4 },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: "Mount Kigali University",
+    code: "MKU",
+    country: "Rwanda",
+    domain: "mku.ac.rw",
+    active: true,
+    faculties: [
+      {
+        name: "Faculty of Information Technology and Computing",
+        code: "MKU-FITC",
+        departments: [
+          {
+            name: "Department of Information Technology",
+            code: "MKU-IT",
+            programs: [
+              { name: "Bachelor of Information Technology", code: "MKU-BIT", level: "UNDERGRADUATE", years: 4 },
+              { name: "Bachelor of Computer Science", code: "MKU-BCS", level: "UNDERGRADUATE", years: 4 },
+            ],
+          },
+        ],
+      },
+      {
+        name: "Faculty of Business and Economics",
+        code: "MKU-FBE",
+        departments: [
+          {
+            name: "Department of Business Administration",
+            code: "MKU-BUS",
+            programs: [
+              { name: "Bachelor of Business Administration", code: "MKU-BBA", level: "UNDERGRADUATE", years: 4 },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: "University of Rwanda",
+    code: "UR",
+    country: "Rwanda",
+    domain: "ur.ac.rw",
+    active: true,
+    faculties: [
+      {
+        name: "College of Science and Technology",
+        code: "UR-CST",
+        departments: [
+          {
+            name: "School of Information and Communication Technology",
+            code: "UR-ICT",
+            programs: [
+              { name: "Bachelor of Information Technology", code: "UR-BIT", level: "UNDERGRADUATE", years: 4 },
+              { name: "Bachelor of Computer Science", code: "UR-BCS", level: "UNDERGRADUATE", years: 4 },
+            ],
+          },
+        ],
+      },
+      {
+        name: "College of Business and Economics",
+        code: "UR-CBE",
+        departments: [
+          {
+            name: "School of Business",
+            code: "UR-BUS",
+            programs: [
+              { name: "Bachelor of Business Administration", code: "UR-BBA", level: "UNDERGRADUATE", years: 4 },
             ],
           },
         ],
@@ -233,12 +306,13 @@ async function seedAcademic() {
 
   for (const university of UNIVERSITIES) {
     const row = await queryOne(
-      `INSERT INTO universities (name, code, country, domain)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO universities (name, code, country, domain, is_active)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (code) DO UPDATE
-         SET name = EXCLUDED.name, country = EXCLUDED.country, domain = EXCLUDED.domain
+         SET name = EXCLUDED.name, country = EXCLUDED.country, domain = EXCLUDED.domain,
+             is_active = EXCLUDED.is_active
        RETURNING id`,
-      [university.name, university.code, university.country, university.domain ?? null],
+      [university.name, university.code, university.country, university.domain ?? null, university.active !== false],
       "seed:university",
     );
 
@@ -382,7 +456,7 @@ const DEMO_USERS = [
   },
   {
     email: "nur@yopmail.com",
-    role: "GROUP_LEADER",
+    role: "STUDENT",
     firstName: "Nur",
     lastName: "Aisyah",
     profile: {
@@ -420,7 +494,7 @@ const DEMO_USERS = [
   },
   {
     email: "danial@yopmail.com",
-    role: "GROUP_LEADER",
+    role: "STUDENT",
     firstName: "Danial",
     lastName: "Hakim",
     profile: {
@@ -730,11 +804,11 @@ async function seedDemo() {
 
   await seedDemoGroup(ids, { courses, topics, goals });
   await seedDemoSecondGroup(ids, { courses, topics, goals });
-  await seedDemoPartners(ids);
 }
 
 /**
- * One real study group with two members, a workspace, tasks and a session.
+ * One real study group with three members, group-scoped outcomes, tasks and a
+ * session. Legacy container scope is deliberately not required.
  *
  * Inserted with SQL rather than through the services because the seed needs the
  * outcome rows the services create, and duplicating that logic here would mean two
@@ -841,48 +915,21 @@ async function seedDemoGroup(ids, { courses, topics, goals }) {
       "seed:legacyInvites",
     );
 
-    // A workspace is created by the trigger on study_groups, so it is read back
-    // rather than inserted. Outcome rows are written here because the activity
-    // triggers in migration 006 credit a row that already exists; inserting them
-    // after the tasks and messages would leave the activity counters at zero.
-    const workspace = await tx.query(
-      "SELECT id FROM workspaces WHERE group_id = $1 AND NOT is_archived",
-      [groupId],
-      "seed:workspace",
-    );
-    let workspaceId = workspace.rows[0]?.id;
-    if (!workspaceId) {
-      const createdWorkspace = await tx.query(
-        `INSERT INTO workspaces (group_id, name, description, created_by)
-         VALUES ($1, 'Database Systems Exam Prep — Workspace', '', $2)
-         RETURNING id`,
-        [groupId, ownerId],
-        "seed:createWorkspace",
-      );
-      workspaceId = createdWorkspace.rows[0].id;
+    // Outcome rows must exist before activity rows so the group-scoped activity
+    // triggers can credit sessions, tasks and messages immediately.
+    for (const [studentId, joinedVia] of [
+      [ownerId, "DIRECT"],
+      [memberId, "INVITATION"],
+      [hiddenMemberId, "JOIN_REQUEST"],
+    ]) {
       await tx.query(
-        `INSERT INTO workspace_groups (workspace_id, group_id, assigned_by)
+        `INSERT INTO group_membership_outcomes (group_id, student_id, joined_via)
          VALUES ($1, $2, $3)
-         ON CONFLICT (workspace_id, group_id) DO NOTHING`,
-        [workspaceId, groupId, ownerId],
-        "seed:workspaceGroup",
+         ON CONFLICT (group_id, student_id)
+         DO UPDATE SET joined_via = EXCLUDED.joined_via`,
+        [groupId, studentId, joinedVia],
+        "seed:outcome",
       );
-    }
-    if (workspaceId) {
-      for (const [studentId, joinedVia] of [
-        [ownerId, "DIRECT"],
-        [memberId, "INVITATION"],
-        [hiddenMemberId, "JOIN_REQUEST"],
-      ]) {
-        await tx.query(
-          `INSERT INTO group_membership_outcomes (workspace_id, student_id, joined_via)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (workspace_id, student_id)
-           DO UPDATE SET joined_via = EXCLUDED.joined_via`,
-          [workspaceId, studentId, joinedVia],
-          "seed:outcome",
-        );
-      }
     }
 
     // Everything below is part of the initial population and would be duplicated
@@ -890,32 +937,32 @@ async function seedDemoGroup(ids, { courses, topics, goals }) {
     if (!fresh) return;
 
     const plan = await tx.query(
-      `INSERT INTO study_plans (workspace_id, title, description, deadline, created_by)
+      `INSERT INTO study_plans (group_id, title, description, deadline, created_by)
        VALUES ($1, 'Exam revision plan', 'Three weeks to the final.', CURRENT_DATE + 21, $2)
        RETURNING id`,
-      [workspaceId, ownerId],
+      [groupId, ownerId],
       "seed:plan",
     );
 
     await tx.query(
-      `INSERT INTO tasks (workspace_id, plan_id, title, description, assignee_id, created_by, status, priority)
+      `INSERT INTO tasks (group_id, plan_id, title, description, assignee_id, created_by, status, priority)
        VALUES
-         ($1, $2, 'Redo 2023 paper Q4 and Q7', 'Focus on the join ordering.', $3, $3, 'TODO', 'HIGH'),
-         ($1, $2, 'Write normalisation notes', 'Third normal form, with examples that are not from the textbook.', $4, $4, 'TODO', 'MEDIUM'),
+          ($1, $2, 'Redo 2023 paper Q4 and Q7', 'Focus on the join ordering.', $3, $3, 'TODO', 'HIGH'),
+          ($1, $2, 'Write normalisation notes', 'Third normal form, with examples that are not from the textbook.', $4, $4, 'TODO', 'MEDIUM'),
          ($1, $2, 'Indexing reading', 'B-tree vs hash, and when the planner ignores you.', $3, $4, 'COMPLETED', 'MEDIUM')`,
-      [workspaceId, plan.rows[0].id, ownerId, memberId],
+      [groupId, plan.rows[0].id, ownerId, memberId],
       "seed:tasks",
     );
 
     // A session in the future, so the "upcoming" filter has a row to return.
     await tx.query(
-      `INSERT INTO study_sessions (workspace_id, plan_id, topic_id, title, starts_at, ends_at,
+      `INSERT INTO study_sessions (group_id, plan_id, topic_id, title, starts_at, ends_at,
                                    mode, location, agenda, created_by)
        VALUES ($1, $2, $3, 'Past paper walkthrough',
                date_trunc('hour', now()) + interval '2 days',
                date_trunc('hour', now()) + interval '2 days' + interval '2 hours',
                'PHYSICAL', 'Library study room 2', 'Bring your attempted answers.', $4)`,
-      [workspaceId, plan.rows[0].id, topics.get("SCS 2103::SQL Querying"), ownerId],
+      [groupId, plan.rows[0].id, topics.get("SCS 2103::SQL Querying"), ownerId],
       "seed:session",
     );
   }, "seed:demoGroup");
@@ -941,8 +988,8 @@ async function seedDemoGroup(ids, { courses, topics, goals }) {
 /**
  * A second group led by Danial, so the leader-overview endpoint and the
  * leadership UI have more than one non-empty row to show. Kept deliberately
- * lighter than the flagship demo group: memberships, topics, outcomes, and the
- * auto-created workspace are enough.
+ * lighter than the flagship demo group: memberships, topics, and group-scoped
+ * outcomes are enough.
  */
 async function seedDemoSecondGroup(ids, { courses, topics, goals }) {
   const leaderId = ids.get("danial@yopmail.com");
@@ -995,121 +1042,17 @@ async function seedDemoSecondGroup(ids, { courses, topics, goals }) {
       );
     }
 
-    // The workspace is created by a trigger on study_groups; outcome rows are
-    // written here for the same reason as in `seedDemoGroup`.
-    const workspace = await tx.query(
-      "SELECT id FROM workspaces WHERE group_id = $1 AND NOT is_archived",
-      [groupId],
-      "seed:group2Workspace",
-    );
-    const workspaceId = workspace.rows[0]?.id;
-    if (workspaceId) {
-      for (const studentId of [leaderId, ...memberIds]) {
-        await tx.query(
-          `INSERT INTO group_membership_outcomes (workspace_id, student_id, joined_via)
-           VALUES ($1, $2, 'DIRECT')
-           ON CONFLICT (workspace_id, student_id) DO NOTHING`,
-          [workspaceId, studentId],
-          "seed:group2Outcome",
-        );
-      }
+    // Outcome rows are group-scoped and do not depend on a legacy container.
+    for (const studentId of [leaderId, ...memberIds]) {
+      await tx.query(
+        `INSERT INTO group_membership_outcomes (group_id, student_id, joined_via)
+         VALUES ($1, $2, 'DIRECT')
+         ON CONFLICT (group_id, student_id) DO NOTHING`,
+        [groupId, studentId],
+        "seed:group2Outcome",
+      );
     }
   }, "seed:demoSecondGroup");
-}
-
-/**
- * Study-partner connections and their direct conversations.
- *
- * Connections are demo data, so they are inserted with `WHERE NOT EXISTS` on the
- * ordered pair rather than through the service: re-running the seed must not
- * duplicate an existing connection, and the pending-pair partial unique index
- * only guards PENDING rows.
- *
- * Accepted pairs get a two-member direct conversation and a few messages, which
- * is what makes the Messages and Study partners dashboards non-empty for a fresh
- * sign-in.
- */
-async function seedDemoPartners(ids) {
-  const nur = ids.get("nur@yopmail.com");
-  const danial = ids.get("danial@yopmail.com");
-  const syafiq = ids.get("syafiq@yopmail.com");
-  if (!nur || !danial || !syafiq) return;
-
-  await withTransaction(async (tx) => {
-    const addConnection = (requesterId, recipientId, status, message) =>
-      tx.query(
-        `INSERT INTO partner_connections (requester_id, recipient_id, status, message, requested_at, responded_at)
-         SELECT $1, $2, $3::partner_connection_status, $4, now(), CASE WHEN $3 = 'ACCEPTED' THEN now() ELSE NULL END
-          WHERE NOT EXISTS (
-            SELECT 1 FROM partner_connections WHERE requester_id = $1 AND recipient_id = $2
-          )`,
-        [requesterId, recipientId, status, message],
-        "seed:partnerConnection",
-      );
-
-    await addConnection(nur, danial, "ACCEPTED", "We prep for the same database finals — study together?");
-    await addConnection(danial, syafiq, "ACCEPTED", "Your algorithm cheat sheets are gold. Pair up?");
-    await addConnection(syafiq, nur, "PENDING", "I could really use help with normalisation before the exam.");
-
-    const addConversation = async (firstId, secondId, messages) => {
-      const found = await tx.query(
-        `SELECT id FROM direct_conversations dc
-          WHERE EXISTS (SELECT 1 FROM direct_conversation_members m WHERE m.conversation_id = dc.id AND m.user_id = $1)
-            AND EXISTS (SELECT 1 FROM direct_conversation_members m WHERE m.conversation_id = dc.id AND m.user_id = $2)`,
-        [firstId, secondId],
-        "seed:findConversation",
-      );
-      let conversationId = found.rows[0]?.id;
-
-      if (!conversationId) {
-        const created = await tx.query(
-          "INSERT INTO direct_conversations (created_by) VALUES ($1) RETURNING id",
-          [firstId],
-          "seed:createConversation",
-        );
-        conversationId = created.rows[0].id;
-        await tx.query(
-          `INSERT INTO direct_conversation_members (conversation_id, user_id)
-           VALUES ($1, $2), ($1, $3)`,
-          [conversationId, firstId, secondId],
-          "seed:conversationMembers",
-        );
-      }
-
-      const counted = await tx.query(
-        "SELECT count(*)::int AS count FROM direct_messages WHERE conversation_id = $1",
-        [conversationId],
-        "seed:countMessages",
-      );
-      if (counted.rows[0].count > 0) return;
-
-      for (const [senderId, body] of messages) {
-        await tx.query(
-          "INSERT INTO direct_messages (conversation_id, sender_id, body) VALUES ($1, $2, $3)",
-          [conversationId, senderId, body],
-          "seed:directMessage",
-        );
-      }
-      await tx.query(
-        "UPDATE direct_conversations SET last_message_at = now() WHERE id = $1",
-        [conversationId],
-        "seed:conversationTouch",
-      );
-    };
-
-    await addConversation(nur, danial, [
-      [nur, "Hey Danial! Ready for the past paper session this week?"],
-      [danial, "Absolutely — I did Q4 from the 2023 paper. The join ordering was brutal."],
-      [nur, "Same. Let me share my normalisation notes before Thursday."],
-      [danial, "Perfect, thanks Nur!"],
-    ]);
-
-    await addConversation(danial, syafiq, [
-      [danial, "Your search algorithm cheat sheet helped a lot last week."],
-      [syafiq, "Glad it was useful! Want to review knowledge representation together?"],
-      [danial, "Sure, Saturday afternoon works for me."],
-    ]);
-  }, "seed:demoPartners");
 }
 
 // ---------------------------------------------------------------------------

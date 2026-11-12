@@ -11,7 +11,6 @@ import {
   NotFoundError,
 } from "../lib/errors.js";
 import { assertMember } from "./group.service.js";
-import { assertWorkspaceAccess } from "./workspace.service.js";
 import { publishToSession } from "../lib/realtime.js";
 import { notifyMany } from "../lib/notifications.js";
 import {
@@ -39,7 +38,7 @@ import logger from "../config/logger.js";
  *    rotate roles;
  *  - the current round's TIMER assignee may also drive the timer;
  *  - ADMIN role has NO implicit access — sessions live inside a group's
- *    membership, exactly like workspaces do.
+ *    membership.
  */
 
 const MEMBER_MOD_ROLES = ["OWNER", "MODERATOR"];
@@ -69,24 +68,29 @@ const DEFAULT_AGENDA = Object.freeze([
 // ---------------------------------------------------------------------------
 
 /**
- * Load a session together with its group and workspace context. Does not check
+ * Load a session together with its group context. Does not check
  * membership — caller decides what to do with the data.
  */
 async function loadSession(sessionId) {
   const session = await queryOne(
-    `SELECT s.*, w.name AS workspace_name, w.is_archived,
-            g.id AS group_id, g.name AS group_name, g.slug AS group_slug,
+    `SELECT s.id, s.group_id, s.plan_id, s.topic_id, s.title, s.starts_at, s.ends_at,
+            s.mode, s.location, s.meeting_url, s.agenda, s.status,
+            s.attendance_tracked, s.created_by, s.created_at, s.updated_at,
+            s.format, s.main_topic, s.objectives, s.preparation,
+            s.focus_interval_minutes, s.break_minutes, s.started_at, s.paused_at,
+            s.completed_at, s.active_activity_id, s.activity_started_at,
+            s.activity_paused_at, s.activity_elapsed_seconds, s.meeting_room,
+            s.participants_closed, s.cancelled_by, s.cancellation_reason,
+            g.name AS group_name, g.slug AS group_slug,
             c.id AS course_id, c.name AS course_name, c.course_code
        FROM study_sessions s
-       JOIN workspaces w ON w.id = s.workspace_id
-       JOIN study_groups g ON g.id = w.group_id
+       JOIN study_groups g ON g.id = s.group_id
        JOIN courses c ON c.id = g.course_id
        WHERE s.id = $1 AND g.status = 'ACTIVE'`,
     [sessionId],
     "sessions:load",
   );
   if (!session) throw new NotFoundError("That study session");
-  if (session.is_archived) throw new NotFoundError("That study session");
   return session;
 }
 
@@ -134,7 +138,7 @@ export async function canParticipateInSession(sessionId, userId) {
       throw new ForbiddenError("You are not a participant of this session.");
     }
   }
-  return { sessionId: session.id };
+  return { sessionId: session.id, groupId: session.group_id };
 }
 
 /** Strip the audit/chat helper columns no client needs. */
@@ -228,8 +232,8 @@ async function notifyParticipants(session, notification, userIds = null) {
     type: notification.type,
     title: notification.title,
     body: notification.body,
-    link: `/groups/${session.group_slug}/workspace?session=${session.id}`,
-    metadata: { sessionId: session.id },
+    link: `/groups/${session.group_slug}?session=${session.id}`,
+    metadata: { sessionId: session.id, groupId: session.group_id },
   });
 }
 
@@ -237,7 +241,9 @@ async function notifyParticipants(session, notification, userIds = null) {
 // Overview / reading
 // ---------------------------------------------------------------------------
 
-export async function listMySessions(userId, { scope = "all" } = {}) {
+export async function listMySessions(userId, { scope = "all", groupId = null } = {}) {
+  const params = [userId];
+  const groupFilter = groupId ? `AND s.group_id = $${params.push(groupId)}` : "";
   const rows = await queryRows(
     `SELECT s.id, s.title, s.starts_at, s.ends_at, s.status, s.format, s.main_topic,
             s.mode, s.location, s.meeting_url, s.participants_closed, s.meeting_room,
@@ -250,23 +256,22 @@ export async function listMySessions(userId, { scope = "all" } = {}) {
                WHERE r.session_id = s.id AND r.student_id = $1
                  AND r.round_number = (SELECT max(round_number) FROM session_roles WHERE session_id = s.id)) AS my_current_role_count
        FROM study_sessions s
-       JOIN workspaces w ON w.id = s.workspace_id
-       JOIN study_groups g ON g.id = w.group_id
+       JOIN study_groups g ON g.id = s.group_id
        JOIN courses c ON c.id = g.course_id
        JOIN study_group_members m ON m.group_id = g.id AND m.left_at IS NULL
        LEFT JOIN session_participants p ON p.session_id = s.id AND p.student_id = $1
        WHERE m.student_id = $1
-         AND m.status = 'ACTIVE'
-         AND g.status = 'ACTIVE'
-         AND NOT w.is_archived
-         AND (${scopeClause(scope)})
+          AND m.status = 'ACTIVE'
+          AND g.status = 'ACTIVE'
+          ${groupFilter}
+          AND (${scopeClause(scope)})
       ORDER BY
         CASE WHEN s.status IN ('ACTIVE', 'PAUSED') THEN 0
              WHEN s.status = 'SCHEDULED' THEN 1
              ELSE 2 END,
         s.starts_at ASC
       LIMIT 200`,
-    [userId],
+    params,
     "sessions:myList",
   );
   return rows;
@@ -339,8 +344,7 @@ export async function getSession(sessionId, userId) {
  * ids only. A GUIDED session comes with a starter agenda unless one is given.
  */
 export async function createStudySession(userId, input) {
-  const { workspace, group } = await assertWorkspaceAccess(input.workspaceId, userId);
-  const { membership } = await assertMember(group.id, userId);
+  const { group, membership } = await assertMember(input.groupId, userId);
   if (!canModerate(membership)) {
     throw new ForbiddenError("Only the group leader can schedule study sessions.");
   }
@@ -367,13 +371,13 @@ export async function createStudySession(userId, input) {
   const result = await withTransaction(async (tx) => {
     const session = await tx.queryOne(
       `INSERT INTO study_sessions
-         (workspace_id, title, starts_at, ends_at, mode, location, meeting_url,
+         (group_id, title, starts_at, ends_at, mode, location, meeting_url,
           format, main_topic, objectives, preparation, focus_interval_minutes,
           break_minutes, meeting_room, participants_closed, created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
        RETURNING *`,
       [
-        workspace.id,
+        group.id,
         input.title,
         input.startsAt,
         input.endsAt,
@@ -456,7 +460,7 @@ export async function createStudySession(userId, input) {
     },
   );
 
-  publishToSession(result.id, "session:created", { sessionId: result.id, title: loaded.title });
+  publishToSession(result.id, loaded.group_id, "session:created", { title: loaded.title });
 
   const { session: detail } = await getSessionWithReturn(result.id, userId);
   return detail;
@@ -537,7 +541,7 @@ export async function updateSessionDetails(sessionId, userId, updates) {
     "sessions:updateDetails",
   );
 
-  publishToSession(sessionId, "session:updated", { sessionId });
+  publishToSession(sessionId, access.session.group_id, "session:updated", {});
 
   const { session } = await getSessionWithReturn(sessionId, userId);
   return session;
@@ -576,7 +580,7 @@ export async function startSession(sessionId, userId) {
       body: session.title,
     },
   );
-  publishToSession(sessionId, "session:lifecycle", { sessionId, status: "ACTIVE" });
+  publishToSession(sessionId, session.group_id, "session:lifecycle", { status: "ACTIVE" });
 
   const { session: detail } = await getSessionWithReturn(sessionId, userId);
   return detail;
@@ -599,7 +603,7 @@ export async function pauseSession(sessionId, userId) {
   );
   if (!updated) throw new ConflictError("That session is not running.");
 
-  publishToSession(sessionId, "session:lifecycle", { sessionId, status: "PAUSED" });
+  publishToSession(sessionId, access.session.group_id, "session:lifecycle", { status: "PAUSED" });
   const { session: detail } = await getSessionWithReturn(sessionId, userId);
   return detail;
 }
@@ -621,7 +625,7 @@ export async function resumeSession(sessionId, userId) {
   );
   if (!updated) throw new ConflictError("That session is not paused.");
 
-  publishToSession(sessionId, "session:lifecycle", { sessionId, status: "ACTIVE" });
+  publishToSession(sessionId, access.session.group_id, "session:lifecycle", { status: "ACTIVE" });
   const { session: detail } = await getSessionWithReturn(sessionId, userId);
   return detail;
 }
@@ -645,7 +649,7 @@ export async function completeSession(sessionId, userId) {
     "sessions:complete",
   );
 
-  publishToSession(sessionId, "session:lifecycle", { sessionId, status: "COMPLETED" });
+  publishToSession(sessionId, access.session.group_id, "session:lifecycle", { status: "COMPLETED" });
   const { session: detail } = await getSessionWithReturn(sessionId, userId);
   return detail;
 }
@@ -677,13 +681,13 @@ export async function cancelSession(sessionId, userId) {
         type: NOTIFICATION_TYPE.SESSION_UPDATED,
         title: "A study session was cancelled",
         body: access.session.title,
-        link: `/groups/${access.session.group_slug}/workspace`,
-        metadata: { sessionId: sessionId },
+        link: `/groups/${access.session.group_slug}?session=${sessionId}`,
+        metadata: { sessionId, groupId: access.session.group_id },
       },
     );
   }
 
-  publishToSession(sessionId, "session:lifecycle", { sessionId, status: "CANCELLED" });
+  publishToSession(sessionId, access.session.group_id, "session:lifecycle", { status: "CANCELLED" });
   return { status: "CANCELLED" };
 }
 
@@ -709,7 +713,7 @@ export async function addParticipant(sessionId, userId, studentId) {
     "sessions:addParticipant",
   );
 
-  publishToSession(sessionId, "session:participants", { sessionId });
+  publishToSession(sessionId, access.session.group_id, "session:participants", {});
 
   if (access.session.participants_closed) {
     await query(
@@ -749,7 +753,7 @@ export async function removeParticipant(sessionId, userId, studentId) {
     "sessions:purgeRoles",
   );
 
-  publishToSession(sessionId, "session:participants", { sessionId });
+  publishToSession(sessionId, access.session.group_id, "session:participants", {});
   const { session: detail } = await getSessionWithReturn(sessionId, userId);
   return detail;
 }
@@ -764,7 +768,7 @@ export async function setRsvp(sessionId, userId, rsvp) {
     throw new ConflictError("RSVP is only available before the session starts.");
   }
 
-  if (!access.participant && !access.session.participants_closed) {
+  if (!access.participant && access.session.participants_closed) {
     throw new ForbiddenError("This session has a fixed participant list.");
   }
 
@@ -776,7 +780,7 @@ export async function setRsvp(sessionId, userId, rsvp) {
     "sessions:rsvp",
   );
 
-  publishToSession(sessionId, "session:participants", { sessionId });
+  publishToSession(sessionId, access.session.group_id, "session:participants", {});
   return getSession(sessionId, userId);
 }
 
@@ -854,7 +858,7 @@ export async function rotateRoles(sessionId, userId, { roundNumber = null } = {}
     return { ...row, first_name: p?.first_name ?? null, last_name: p?.last_name ?? null };
   });
 
-  publishToSession(sessionId, "session:roles", { sessionId, roundNumber: round, roles: withNames });
+  publishToSession(sessionId, access.session.group_id, "session:roles", { roundNumber: round, roles: withNames });
 
   await notifyParticipants(
     await loadSession(sessionId),
@@ -893,7 +897,7 @@ export async function assignRole(sessionId, userId, { roundNumber, studentId, ro
     "sessions:assignRole",
   );
 
-  publishToSession(sessionId, "session:roles", { sessionId, roundNumber, roles: [row] });
+  publishToSession(sessionId, access.session.group_id, "session:roles", { roundNumber, roles: [row] });
   return row;
 }
 
@@ -935,7 +939,7 @@ export async function setAgenda(sessionId, userId, { activities }) {
     }
   }, "sessions:agenda");
 
-  publishToSession(sessionId, "session:activity", { sessionId, agenda: normalized });
+  publishToSession(sessionId, access.session.group_id, "session:activity", { agenda: normalized });
   return getSession(sessionId, userId);
 }
 
@@ -1018,14 +1022,14 @@ export async function advanceActivity(sessionId, userId) {
       [sessionId, first.id],
       "sessions:advanceFirst",
     );
-    publishToSession(sessionId, "session:activity", { sessionId, activeActivityId: first.id });
+    publishToSession(sessionId, access.session.group_id, "session:activity", { activeActivityId: first.id });
     return getSession(sessionId, userId);
   }
 
   const currentIndex = agenda.findIndex((a) => a.id === access.session.active_activity_id);
   const next = agenda[currentIndex + 1];
   if (!next) {
-    publishToSession(sessionId, "session:activity", { sessionId, done: true });
+    publishToSession(sessionId, access.session.group_id, "session:activity", { done: true });
     const { session: detail } = await getSessionWithReturn(sessionId, userId);
     return detail;
   }
@@ -1039,7 +1043,7 @@ export async function advanceActivity(sessionId, userId) {
     "sessions:advance",
   );
 
-  publishToSession(sessionId, "session:activity", { sessionId, activeActivityId: next.id });
+  publishToSession(sessionId, access.session.group_id, "session:activity", { activeActivityId: next.id });
   const { session: detail } = await getSessionWithReturn(sessionId, userId);
   return detail;
 }
@@ -1070,7 +1074,7 @@ export async function pauseTimer(sessionId, userId) {
     "sessions:pauseTimer",
   );
 
-  publishToSession(sessionId, "session:activity", { sessionId, paused: true, elapsedSeconds: elapsed });
+  publishToSession(sessionId, access.session.group_id, "session:activity", { paused: true, elapsedSeconds: elapsed });
   const { session: detail } = await getSessionWithReturn(sessionId, userId);
   return detail;
 }
@@ -1090,7 +1094,7 @@ export async function resumeTimer(sessionId, userId) {
   );
   if (!updated) throw new ConflictError("The timer is not paused.");
 
-  publishToSession(sessionId, "session:activity", { sessionId, paused: false });
+  publishToSession(sessionId, access.session.group_id, "session:activity", { paused: false });
   const { session: detail } = await getSessionWithReturn(sessionId, userId);
   return detail;
 }
@@ -1119,7 +1123,7 @@ export async function extendActivity(sessionId, userId, { minutes }) {
     "sessions:extend",
   );
 
-  publishToSession(sessionId, "session:activity", { sessionId, activeActivityId: access.session.active_activity_id });
+  publishToSession(sessionId, access.session.group_id, "session:activity", { activeActivityId: access.session.active_activity_id });
   const { session: detail } = await getSessionWithReturn(sessionId, userId);
   return detail;
 }
@@ -1174,10 +1178,10 @@ export async function sendSessionMessage(sessionId, userId, { body, clientId }) 
   let message;
   try {
     message = await queryOne(
-      `INSERT INTO messages (workspace_id, session_id, author_id, client_id, body)
-       VALUES (NULL, $1, $2, $3, $4)
+      `INSERT INTO messages (group_id, session_id, author_id, client_id, body)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id, body, client_id, created_at`,
-      [sessionId, userId, clientId ?? null, text],
+      [access.session.group_id, sessionId, userId, clientId ?? null, text],
       "sessions:sendMessage",
     );
   } catch (error) {
@@ -1204,7 +1208,7 @@ export async function sendSessionMessage(sessionId, userId, { body, clientId }) 
     "sessions:messageAuthor",
   );
 
-  publishToSession(sessionId, "session:message", { sessionId, message: withAuthor });
+  publishToSession(sessionId, access.session.group_id, "session:message", { message: withAuthor });
   return { message: withAuthor };
 }
 
@@ -1255,7 +1259,7 @@ export async function createQuestion(sessionId, userId, { topic, body }) {
     "sessions:createQuestion",
   );
 
-  publishToSession(sessionId, "session:question", { sessionId, question });
+  publishToSession(sessionId, access.session.group_id, "session:question", { question });
   return question;
 }
 
@@ -1284,8 +1288,7 @@ export async function answerQuestion(sessionId, userId, questionId, { body }) {
     "sessions:answerAuthor",
   );
 
-  publishToSession(sessionId, "session:question", {
-    sessionId,
+  publishToSession(sessionId, access.session.group_id, "session:question", {
     questionId,
     kind: "response",
     response: withAuthor,
@@ -1324,7 +1327,7 @@ export async function updateQuestionStatus(sessionId, userId, questionId, status
     "sessions:questionStatus",
   );
 
-  publishToSession(sessionId, "session:question", { sessionId, question: updated });
+  publishToSession(sessionId, access.session.group_id, "session:question", { question: updated });
   return updated;
 }
 
@@ -1361,7 +1364,7 @@ export async function createNote(sessionId, userId, { title, body }) {
     "sessions:createNote",
   );
 
-  publishToSession(sessionId, "session:note", { sessionId, note });
+  publishToSession(sessionId, access.session.group_id, "session:note", { note });
   return note;
 }
 
@@ -1390,7 +1393,7 @@ export async function updateNote(sessionId, userId, noteId, { title, body, versi
     );
   }
 
-  publishToSession(sessionId, "session:note", { sessionId, note: updated });
+  publishToSession(sessionId, access.session.group_id, "session:note", { note: updated });
   return updated;
 }
 
@@ -1407,7 +1410,7 @@ export async function deleteNote(sessionId, userId, noteId) {
   );
   if (!deleted.rowCount) throw new NotFoundError("That note");
 
-  publishToSession(sessionId, "session:note", { sessionId, noteId, deleted: true });
+  publishToSession(sessionId, access.session.group_id, "session:note", { noteId, deleted: true });
   return { deleted: true };
 }
 
@@ -1443,7 +1446,7 @@ export async function setMyPrep(sessionId, userId, status) {
     "sessions:setPrep",
   );
 
-  publishToSession(sessionId, "session:prep", { sessionId, studentId: userId, status });
+  publishToSession(sessionId, access.session.group_id, "session:prep", { studentId: userId, status });
   return { status };
 }
 
@@ -1508,7 +1511,7 @@ export async function submitReflection(sessionId, userId, reflection) {
     "sessions:reflectionGet",
   );
 
-  publishToSession(sessionId, "session:reflection", { sessionId, reflection: saved });
+  publishToSession(sessionId, access.session.group_id, "session:reflection", { reflection: saved });
   return saved;
 }
 
@@ -1547,7 +1550,11 @@ export async function listReflections(sessionId, userId) {
 // ---------------------------------------------------------------------------
 
 export async function getSummary(sessionId, userId) {
-  const { session } = await assertSessionAccess(sessionId, userId);
+  const access = await assertSessionAccess(sessionId, userId);
+  if (!access.isParticipant && !access.isModerator) {
+    throw new ForbiddenError("Only a participant or group leader can view the session summary.");
+  }
+  const { session } = access;
 
   const [participants, roles, activities, questions, notes, prepRows, livedSeconds] =
     await Promise.all([

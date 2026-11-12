@@ -4,6 +4,8 @@ import { getRuntimeTargets as getDatabaseTargets } from "../../services/aiProvid
 
 /**
  * AI provider registry.
+ * Environment provider ordering is resolved once per process for predictable,
+ * low-latency request routing.
  *
  * Providers are enabled on *config* (a provider name + an API key), never on
  * credentials alone, so a half-configured deployment cannot authenticate an
@@ -94,6 +96,35 @@ function resolveAdapter(entry) {
 let cachedTargets = null;
 let runtimeTargets = null;
 
+const DISABLED_PROVIDERS = new Set(
+  String(env.AI_DISABLED_PROVIDERS ?? "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean),
+);
+const PREFERRED_MODELS = new Map(
+  String(env.AI_PREFERRED_MODELS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((model, index) => [model, index]),
+);
+
+function isDisabledProvider(target) {
+  return DISABLED_PROVIDERS.has(String(target?.provider ?? "").trim().toLowerCase());
+}
+
+function orderTargets(targets) {
+  return targets
+    .map((target, index) => ({
+      target,
+      index,
+      preference: PREFERRED_MODELS.get(target.chatModel) ?? PREFERRED_MODELS.size + index,
+    }))
+    .sort((a, b) => a.preference - b.preference || a.index - b.index)
+    .map(({ target }) => target);
+}
+
 export function getTargets() {
   if (runtimeTargets) return runtimeTargets;
   if (cachedTargets) return cachedTargets;
@@ -144,7 +175,7 @@ export function getTargets() {
     }
   }
 
-  cachedTargets = targets.filter((target) => target.apiKey && target.baseUrl);
+  cachedTargets = orderTargets(targets.filter((target) => target.apiKey && target.baseUrl && !isDisabledProvider(target)));
   return cachedTargets;
 }
 
@@ -157,7 +188,7 @@ export async function getTargetsAsync() {
   try {
     const databaseTargets = await getDatabaseTargets();
     const environmentTargets = getEnvironmentTargets();
-    runtimeTargets = [...databaseTargets, ...environmentTargets];
+    runtimeTargets = orderTargets([...databaseTargets, ...environmentTargets].filter((target) => !isDisabledProvider(target)));
     return runtimeTargets;
   } catch (error) {
     logger.warn("AI provider table unavailable; using environment chain", { message: error.message });

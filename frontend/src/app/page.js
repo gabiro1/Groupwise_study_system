@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { SiteFooter, SiteHeader } from "./SiteLayout";
 import { AnimatedSection, Reveal, StaggerGroup, StaggerItem } from "./LandingMotion";
+import LandingHeroAnimation from "./LandingHeroAnimation";
 import { Testimonial } from "@/components/ui/clean-testimonial";
 
 function Arrow() {
@@ -33,7 +34,7 @@ const features = [
     title: "Make progress visible.",
     description: "Share resources, check in on topics, and celebrate what your group has learned.",
     href: "/dashboard/groups",
-    link: "Explore your study space",
+    link: "Explore your study groups",
   },
 ];
 
@@ -47,12 +48,12 @@ const questions = [
     answer: "Recommendations use the courses, topics, availability, and study preferences you choose to share. Matches are suggestions, and you decide whether to join.",
   },
   {
-    question: "What can I do in a group workspace?",
-    answer: "Group workspaces bring study plans, tasks, sessions, chat, shared resources, and progress updates together in one place.",
+    question: "What can I do in a study group?",
+    answer: "Study groups bring plans, tasks, sessions, chat, shared resources, topics, and progress updates together in one place.",
   },
   {
     question: "Is the AI study assistant always available?",
-    answer: "AI availability depends on the service configuration. When available, the workspace assistant is designed to answer from accessible group material and discussion; if there isn’t enough context, it should say so.",
+    answer: "AI availability depends on the service configuration. When available, the study assistant answers from accessible group material and discussion; if there isn’t enough context, it should say so.",
   },
   {
     question: "Do I have to meet in person?",
@@ -65,16 +66,16 @@ export default function Home() {
     <main className="landing-page landing-home">
       <SiteHeader />
 
-      <section className="landing-hero home-hero">
-        <Reveal className="landing-hero-copy" inView={false}>
-          <div className="landing-pill"><span /> A little better, together</div>
-          <h1>Learning feels<br />lighter <span>together.</span></h1>
-          <p>Find your people, make time to study, and turn the hard parts of learning into something you can share.</p>
-          <div className="landing-hero-actions">
+      <LandingHeroAnimation>
+        <div className="landing-hero-copy">
+          <div className="landing-pill landing-hero-motion-item"><span /> A little better, together</div>
+          <h1 className="landing-hero-motion-item">Learning feels<br />lighter <span>together.</span></h1>
+          <p className="landing-hero-motion-item">Find your people, make time to study, and turn the hard parts of learning into something you can share.</p>
+          <div className="landing-hero-actions landing-hero-motion-item">
             <Link className="landing-primary-button" href="/register">Find your study crew <Arrow /></Link>
             <a className="landing-text-link" href="#how-it-works">See how it works <span aria-hidden="true">↓</span></a>
           </div>
-          <div className="landing-social-proof">
+          <div className="landing-social-proof landing-hero-motion-item">
             <div className="landing-avatar-stack" aria-label="A group of study buddies">
               <span className="landing-avatar" tabIndex={0} role="img" aria-label="Study buddy">
                 <img src="https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=96&h=96&q=80" alt="" />
@@ -84,9 +85,9 @@ export default function Home() {
                 <img src="https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&w=96&h=96&q=80" alt="" />
                 <span className="landing-avatar-tooltip" aria-hidden="true">Course mate</span>
               </span>
-              <span className="landing-avatar" tabIndex={0} role="img" aria-label="Study partner">
+              <span className="landing-avatar" tabIndex={0} role="img" aria-label="Group member">
                 <img src="https://images.unsplash.com/photo-1487412720507-e7ab37603c6f?auto=format&fit=crop&w=96&h=96&q=80" alt="" />
-                <span className="landing-avatar-tooltip" aria-hidden="true">Study partner</span>
+                <span className="landing-avatar-tooltip" aria-hidden="true">Group member</span>
               </span>
               <span className="landing-avatar" tabIndex={0} role="img" aria-label="Group member">
                 <img src="https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&w=96&h=96&q=80" alt="" />
@@ -95,13 +96,13 @@ export default function Home() {
             </div>
             <div><strong>Good things happen in good company.</strong><small>Make a little progress, together.</small></div>
           </div>
-        </Reveal>
+        </div>
         <div className="home-hero-orbit" aria-hidden="true">
           <span className="home-orbit-dot orbit-dot-one" />
           <span className="home-orbit-dot orbit-dot-two" />
           <span className="home-orbit-dot orbit-dot-three" />
         </div>
-      </section>
+      </LandingHeroAnimation>
 
       <AnimatedSection className="home-section home-how" id="how-it-works" label="How Lien works">
         <Reveal className="home-section-heading">
@@ -153,7 +154,7 @@ export default function Home() {
       <AnimatedSection className="home-ai-section" id="ai-tutor" label="AI study assistant">
         <div className="home-ai-inner">
           <Reveal className="home-ai-copy">
-            <span className="home-section-kicker">A STUDY PARTNER FOR THE STICKY BITS</span>
+            <span className="home-section-kicker">AN AI GUIDE FOR THE STICKY BITS</span>
             <h2>Meet your AI<br />study assistant.</h2>
             <p>Ask questions about the material your group has shared. When the assistant is available, it uses relevant study resources and discussion to ground its answers.</p>
             <ul>
@@ -196,7 +197,7 @@ export default function Home() {
             <span className="home-tool-icon tool-lilac">◷</span><h3>Study sessions</h3><p>Schedule a time, choose online or in person, and let your group RSVP.</p>
           </StaggerItem>
           <StaggerItem className="home-tool-card">
-            <span className="home-tool-icon tool-yellow">↗</span><h3>Resources and chat</h3><p>Share useful links or notes and keep the conversation in your group space.</p>
+            <span className="home-tool-icon tool-yellow">↗</span><h3>Resources and chat</h3><p>Share useful links or notes and keep the conversation with your group.</p>
           </StaggerItem>
         </StaggerGroup>
       </AnimatedSection>

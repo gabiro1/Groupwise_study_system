@@ -29,9 +29,8 @@ router.use(requireAuth);
 /**
  * Student profile and discovery endpoints.
  *
- * All routes require a STUDENT role (group leaders included): every account here
- * has a student profile, and `requireStudent` keeps that distinction explicit
- * rather than implicit.
+ * All routes require the STUDENT account role. Group leadership is a membership
+ * permission, and every student may still own or moderate a study group.
  */
 
 const studentIdParamSchema = z.object({ studentId: z.string().uuid() });
@@ -187,7 +186,7 @@ router.get(
 /**
  * GET /api/students/me/summary
  * The overview counters for the dashboard: groups, pending invitations and
- * requests, upcoming sessions, partnership notifications and unread messages.
+ * requests, upcoming sessions, and system notifications.
  */
 router.get(
   "/me/summary",

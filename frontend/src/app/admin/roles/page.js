@@ -11,22 +11,12 @@ const PAGE_SIZE = 25;
 
 const ROLES = [
   { key: "STUDENT", label: "Student" },
-  { key: "GROUP_LEADER", label: "Group Leader" },
   { key: "ADMIN", label: "Administrator" },
 ];
 
 const ROLE_ACTIONS = {
-  STUDENT: [
-    { value: "GROUP_LEADER", label: "Promote to Group Leader" },
-  ],
-  GROUP_LEADER: [
-    { value: "STUDENT", label: "Demote to Student" },
-    { value: "ADMIN", label: "Promote to Administrator" },
-  ],
-  ADMIN: [
-    { value: "STUDENT", label: "Demote to Student" },
-    { value: "GROUP_LEADER", label: "Demote to Group Leader" },
-  ],
+  STUDENT: [],
+  ADMIN: [],
 };
 
 function RolesContent() {
@@ -150,7 +140,7 @@ function RolesContent() {
     <>
       <PageHeading
         title="Roles & Permissions"
-        subtitle="View users by role and promote or demote accounts."
+        subtitle="Global roles are Student and Administrator; group leadership is membership-scoped."
         onRefresh={reload}
         refreshing={loading}
       />

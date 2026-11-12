@@ -1,11 +1,13 @@
 import { notFound } from "next/navigation";
-import DashboardWorkspace from "../../DashboardWorkspace";
+import { WorkspaceCompatibility } from "../../CompatibilityRedirect";
 
-export default async function WorkspacePage({ params, searchParams }) {
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export default async function LegacyContainerDetailPage({ params, searchParams }) {
   const { workspaceId } = await params;
-  const { tab } = await searchParams;
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(workspaceId)) {
+  const query = await searchParams;
+  if (!UUID.test(workspaceId)) {
     notFound();
   }
-  return <DashboardWorkspace section="workspace" workspaceId={workspaceId} workspaceTab={tab} />;
+  return <WorkspaceCompatibility legacyId={workspaceId} tab={query.tab} />;
 }

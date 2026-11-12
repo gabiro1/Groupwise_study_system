@@ -38,7 +38,7 @@ function SendIcon() {
  * Floating, grounded study assistant.
  *
  * It answers from every resource the student can already read (all their courses
- * and group workspaces) plus a factual snapshot of their platform activity, and
+ * and study groups) plus a factual snapshot of their platform activity, and
  * cites the material it used. When no provider is configured the bubble is still
  * offered but the panel explains how to switch AI on instead of failing.
  */
@@ -49,7 +49,7 @@ export default function FloatingAssistant() {
   const [messages, setMessages] = useState([
     {
       role: "assistant",
-      content: "Hi! I’m your Lien study assistant. Ask me about your courses, groups, partners, or anything your group has shared.",
+      content: "Hi! I’m your Lien study assistant. Ask me about your courses, groups, or anything your group has shared.",
       sources: [],
       sourceMode: "LOCAL",
       showEvidence: false,

@@ -143,7 +143,7 @@ export function courseCompatibility(sharedCourseCount, sameProgramme = false) {
 /**
  * Skill complementarity — the research contribution.
  *
- * The key insight: a partner is best when their knowledge profile *fills your
+ * The key insight: a classmate is valuable when their knowledge profile *fills your
  * gaps*, not when it mirrors yours. Two signals are combined.
  *
  * **Per-topic quality** — for each shared topic, how much knowledge actually
@@ -153,7 +153,7 @@ export function courseCompatibility(sharedCourseCount, sameProgramme = false) {
  *   - both weak            → mutual reinforcement, the weakest case
  *
  * **Gap coverage** — the fraction of the seeker's declared weaknesses that the
- * candidate can actually address. Without this term a partner strong in one
+ * candidate can actually address. Without this term a classmate strong in one
  * topic scores as highly as one strong in every gap, which is wrong: a group
  * of four students all weak in Normalization is not a study group.
  *
@@ -342,7 +342,7 @@ function sessionLengthCompatibility(mine, theirs) {
 }
 
 /**
- * Group-size compatibility. Both partners' ranges are honoured: the combined
+ * Group-size compatibility. Both classmates' ranges are honoured: the combined
  * group must satisfy at least one's minimum and neither one's maximum.
  */
 export function groupSizeCompatibility(studentPref = {}, groupSize = null, groupMax = null) {
@@ -390,7 +390,7 @@ export function activityCompatibility(student, group) {
 }
 
 /**
- * Textual agreement between two free-text partner preferences.
+ * Textual agreement between two free-text collaboration preferences.
  *
  * The free-text note is not structured enough for the weighted core; instead it
  * acts as a soft secondary signal. A Jaccard overlap on the word sets rewards

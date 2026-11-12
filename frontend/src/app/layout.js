@@ -11,7 +11,7 @@ const poppins = Poppins({
 
 export const metadata = {
   title: "Lien | Mount Kigali University",
-  description: "Find study partners, form groups, and learn together with Lien.",
+  description: "Discover study groups, collaborate, and learn together with Lien.",
   icons: {
     icon: mkuLogo.src,
   },

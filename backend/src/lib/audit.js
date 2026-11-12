@@ -230,6 +230,7 @@ export const AUDIT = Object.freeze({
 
   ADMIN_BOOTSTRAP: "admin.bootstrap.created",
   USER_UPDATED_BY_ADMIN: "admin.user.updated",
+  STUDENT_REGISTRATION_NUMBER_UPDATED: "admin.student.registration_number.updated",
 
   MAINTENANCE_ENABLED: "admin.maintenance.enabled",
   MAINTENANCE_DISABLED: "admin.maintenance.disabled",

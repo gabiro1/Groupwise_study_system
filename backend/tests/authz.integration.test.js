@@ -2,6 +2,8 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import "./test-database.js";
 
 /**
@@ -45,7 +47,7 @@ process.env.LOG_LEVEL = "silent";
 // Import after the environment is configured so env validation and the pool
 // use the test database. Dynamic import guarantees the ordering above.
 const { createApp } = await import("../src/config/app.js");
-const { pool, query, queryOne, queryRows, closePool } = await import("../src/config/db.js");
+const { pool, query, queryOne, queryRows, withTransaction, closePool } = await import("../src/config/db.js");
 const { signAccessToken } = await import("../src/lib/tokens.js");
 const { hashPassword } = await import("../src/lib/crypto.js");
 const { ROLES } = await import("../src/config/constants.js");
@@ -89,6 +91,7 @@ const tag = (label) => `authz-${RUN}-${label}@example.test`;
 const createdUserIds = [];
 const createdGroupIds = [];
 const createdReportIds = [];
+const createdStoragePaths = [];
 let fixtureCounter = 0;
 
 /**
@@ -184,6 +187,21 @@ async function anyCourseId() {
   return row.id;
 }
 
+async function anyAcademicPath() {
+  const row = await queryOne(
+    `SELECT f.university_id, f.id AS faculty_id, d.id AS department_id, p.id AS program_id
+       FROM programs p
+       JOIN departments d ON d.id = p.department_id
+       JOIN faculties f ON f.id = d.faculty_id
+      ORDER BY p.name
+      LIMIT 1`,
+    [],
+    "test:academicPath",
+  );
+  assert.ok(row, "at least one academic programme must be seeded");
+  return row;
+}
+
 /**
  * Create a study group with an OWNER, a MODERATOR and a plain MEMBER, plus a
  * pending join request from a fourth student. Returns the fixtures the
@@ -200,25 +218,27 @@ async function createGroupFixture() {
   const courseId = await anyCourseId();
 
   const groupId = randomUUID();
-  await query(
-    `INSERT INTO study_groups (id, slug, name, course_id, description, mode, privacy,
-                               require_approval, min_size, max_size, owner_id, created_by_role)
-     VALUES ($1, $2, $3, $4, '', 'EITHER', 'REQUEST_REQUIRED', TRUE, 3, 8, $5, 'STUDENT')`,
-    [groupId, `authz-${RUN}-group-${n}`, `Authz Group ${RUN}-${n}`, courseId, owner.id],
-    "test:createGroup",
-  );
-  createdGroupIds.push(groupId);
+  // Group owner integrity is a deferred database invariant, so the group and
+  // its initial memberships must be committed atomically like the real service.
+  await withTransaction(async (tx) => {
+    await tx.query(
+      `INSERT INTO study_groups (id, slug, name, course_id, description, mode, privacy,
+                                 require_approval, min_size, max_size, owner_id, created_by_role)
+       VALUES ($1, $2, $3, $4, '', 'EITHER', 'REQUEST_REQUIRED', TRUE, 3, 8, $5, 'STUDENT')`,
+      [groupId, `authz-${RUN}-group-${n}`, `Authz Group ${RUN}-${n}`, courseId, owner.id],
+    );
 
-  // Memberships: owner, moderator, plain member. The member_count trigger keeps
-  // study_groups.member_count in sync automatically.
-  await query(
-    `INSERT INTO study_group_members (group_id, student_id, role, status, joined_via) VALUES
-       ($1, $2, 'OWNER', 'ACTIVE', 'DIRECT'),
-       ($1, $3, 'MODERATOR', 'ACTIVE', 'DIRECT'),
-       ($1, $4, 'MEMBER', 'ACTIVE', 'DIRECT')`,
-    [groupId, owner.id, moderator.id, member.id],
-    "test:memberships",
-  );
+    // Memberships: owner, moderator, plain member. The member_count trigger keeps
+    // study_groups.member_count in sync automatically.
+    await tx.query(
+      `INSERT INTO study_group_members (group_id, student_id, role, status, joined_via) VALUES
+         ($1, $2, 'OWNER', 'ACTIVE', 'DIRECT'),
+         ($1, $3, 'MODERATOR', 'ACTIVE', 'DIRECT'),
+         ($1, $4, 'MEMBER', 'ACTIVE', 'DIRECT')`,
+      [groupId, owner.id, moderator.id, member.id],
+    );
+  }, "test:createGroupFixture");
+  createdGroupIds.push(groupId);
 
   // A pending join request from the fourth student, so "approve a join request"
   // has a real prerequisite to act on.
@@ -269,6 +289,26 @@ async function cleanupFixtures() {
   for (const userId of createdUserIds) {
     await query("DELETE FROM users WHERE id = $1", [userId], "test:cleanupUser").catch(() => {});
   }
+  await Promise.all(createdStoragePaths.map((filePath) => rm(filePath, { force: true }).catch(() => {})));
+}
+
+async function createStoredResource({ workspaceId, uploaderId, visibility = "PRIVATE" }) {
+  const storageKey = `${workspaceId}/${randomUUID()}.txt`;
+  const filePath = resolve(process.env.UPLOAD_DIR ?? "./storage/uploads", storageKey);
+  await mkdir(resolve(filePath, ".."), { recursive: true });
+  await writeFile(filePath, "authorization regression fixture");
+  createdStoragePaths.push(filePath);
+
+  return queryOne(
+    `INSERT INTO resources
+       (workspace_id, uploaded_by, title, description, kind, visibility,
+        original_filename, storage_key, mime_type, size_bytes, extraction_status)
+     VALUES ($1, $2, 'Authorization fixture', '', 'FILE', $3,
+             'fixture.txt', $4, 'text/plain', 34, 'SKIPPED')
+     RETURNING id`,
+    [workspaceId, uploaderId, visibility, storageKey],
+    "test:storedResource",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +321,7 @@ let groupLeader;
 before(async () => {
   student = await createUser(ROLES.STUDENT, "reader");
   admin = await createUser(ROLES.ADMIN, "admin");
-  groupLeader = await createUser(ROLES.GROUP_LEADER, "leader");
+  groupLeader = await createUser(ROLES.STUDENT, "leader");
 });
 
 // ===========================================================================
@@ -368,6 +408,7 @@ describe("E. public registration cannot grant privileged roles", () => {
   for (const attempted of ["ADMIN", "GROUP_LEADER"]) {
     it(`rejects a registration attempt specifying role=${attempted}`, async () => {
       const email = tag(`register-${attempted.toLowerCase()}`);
+      const academic = await anyAcademicPath();
       // Complete the CSRF handshake first so the request reaches the role
       // validation and account-creation path, rather than being stopped by CSRF.
       const { cookie, token } = await getCsrf();
@@ -379,6 +420,14 @@ describe("E. public registration cannot grant privileged roles", () => {
           password: "Register!2026x",
           firstName: "Reg",
           lastName: "Attempt",
+          registrationNumber: `TEST/${RUN}/${attempted}`,
+          universityId: academic.university_id,
+          facultyId: academic.faculty_id,
+          departmentId: academic.department_id,
+          programId: academic.program_id,
+          admissionYear: 2024,
+          currentAcademicYear: 2,
+          currentSemester: "Semester 1",
           acceptTerms: true,
           role: attempted, // must be ignored or rejected, never honoured
         },
@@ -405,7 +454,7 @@ describe("E. public registration cannot grant privileged roles", () => {
       // was never granted for this email.
       const privileged = await queryOne(
         `SELECT 1 FROM users u JOIN roles r ON r.id = u.role_id
-          WHERE u.email = $1 AND r.key = $2`,
+          WHERE u.email = $1 AND r.key::text = $2`,
         [email, attempted],
         "test:registerPrivileged",
       );
@@ -418,6 +467,149 @@ describe("E. public registration cannot grant privileged roles", () => {
       }
     });
   }
+});
+
+describe("E2. registration numbers and unified login", () => {
+  it("persists a registration number and permits login by email or number", async () => {
+    const academic = await anyAcademicPath();
+    const email = tag("identifier-login");
+    const registration = `TEST/${RUN.toUpperCase()}/IDENTIFIER`;
+    const registered = await getCsrf();
+    const created = await call("POST", "/api/auth/register", {
+      cookie: registered.cookie,
+      csrfToken: registered.token,
+      body: {
+        email,
+        password: "Register!2026x",
+        firstName: "Identifier",
+        lastName: "Student",
+        registrationNumber: registration,
+        universityId: academic.university_id,
+        facultyId: academic.faculty_id,
+        departmentId: academic.department_id,
+        programId: academic.program_id,
+        admissionYear: 2024,
+        currentAcademicYear: 2,
+        currentSemester: "Semester 1",
+        acceptTerms: true,
+      },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+
+    const createdUser = await queryOne("SELECT id FROM users WHERE email = $1", [email], "test:registrationUser");
+    assert.ok(createdUser);
+    createdUserIds.push(createdUser.id);
+    const profile = await queryOne(
+      "SELECT student_number, admission_year, year_of_study, current_semester, registration_number_verified_at FROM student_profiles WHERE user_id = $1",
+      [createdUser.id],
+      "test:registrationProfile",
+    );
+    assert.equal(profile.student_number, registration);
+    assert.equal(profile.admission_year, 2024);
+    assert.equal(profile.year_of_study, 2);
+    assert.equal(profile.current_semester, "Semester 1");
+    assert.equal(profile.registration_number_verified_at, null);
+
+    const byNumberCsrf = await getCsrf();
+    const byNumber = await call("POST", "/api/auth/login", {
+      cookie: byNumberCsrf.cookie,
+      csrfToken: byNumberCsrf.token,
+      body: { identifier: ` ${registration.toLowerCase()} `, password: "Register!2026x" },
+    });
+    assert.equal(byNumber.status, 200, JSON.stringify(byNumber.body));
+    assert.equal(byNumber.body.data.user.registrationNumber, registration);
+
+    const accessCookie = byNumber.headers.getSetCookie().find((value) => value.startsWith("lien_access="))?.split(";")[0];
+    assert.ok(accessCookie, "login sets an access cookie");
+    const me = await call("GET", "/api/auth/me", { cookie: accessCookie });
+    assert.equal(me.status, 200, JSON.stringify(me.body));
+    assert.equal(me.body.data.user.registrationNumber, registration);
+    assert.equal(me.body.data.user.currentSemester, "Semester 1");
+
+    const byEmailCsrf = await getCsrf();
+    const byEmail = await call("POST", "/api/auth/login", {
+      cookie: byEmailCsrf.cookie,
+      csrfToken: byEmailCsrf.token,
+      body: { identifier: email, password: "Register!2026x" },
+    });
+    assert.equal(byEmail.status, 200, JSON.stringify(byEmail.body));
+  });
+
+  it("permits staff login with an administrator-assigned staff identifier", async () => {
+    const staffIdentifier = `STAFF/${RUN.toUpperCase()}/001`;
+    const assigned = await call("PATCH", `/api/admin/users/${admin.id}`, {
+      token: tokenFor(admin),
+      body: { staffIdentifier },
+    });
+    assert.equal(assigned.status, 200, JSON.stringify(assigned.body));
+
+    const csrf = await getCsrf();
+    const loggedIn = await call("POST", "/api/auth/login", {
+      cookie: csrf.cookie,
+      csrfToken: csrf.token,
+      body: { identifier: ` ${staffIdentifier.toLowerCase()} `, password: "Authz!2026test" },
+    });
+    assert.equal(loggedIn.status, 200, JSON.stringify(loggedIn.body));
+    assert.equal(loggedIn.body.data.user.role, ROLES.ADMIN);
+  });
+
+  it("allows an administrator to assign and verify a legacy student's number", async () => {
+    const target = await createUser(ROLES.STUDENT, "legacy-number-target");
+    const response = await call("PATCH", `/api/admin/users/${target.id}`, {
+      token: tokenFor(admin),
+      body: {
+        registrationNumber: `LEGACY/${RUN.toUpperCase()}/001`,
+        admissionYear: 2023,
+        registrationNumberVerified: true,
+      },
+    });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+
+    const assigned = await queryOne(
+      `SELECT student_number, admission_year, registration_number_verified_at, registration_number_verified_by
+         FROM student_profiles WHERE user_id = $1`,
+      [target.id],
+      "test:assignedRegistrationNumber",
+    );
+    assert.equal(assigned.student_number, `LEGACY/${RUN.toUpperCase()}/001`);
+    assert.equal(assigned.admission_year, 2023);
+    assert.ok(assigned.registration_number_verified_at);
+    assert.equal(assigned.registration_number_verified_by, admin.id);
+  });
+
+  it("rejects a duplicate registration number", async () => {
+    const academic = await anyAcademicPath();
+    const registration = `DUPLICATE/${RUN}`;
+    const makeRequest = async (email) => {
+      const csrf = await getCsrf();
+      return call("POST", "/api/auth/register", {
+        cookie: csrf.cookie,
+        csrfToken: csrf.token,
+        body: {
+          email,
+          password: "Register!2026x",
+          firstName: "Duplicate",
+          lastName: "Candidate",
+          registrationNumber: registration,
+          universityId: academic.university_id,
+          facultyId: academic.faculty_id,
+          departmentId: academic.department_id,
+          programId: academic.program_id,
+          admissionYear: 2024,
+          currentAcademicYear: 1,
+          currentSemester: "Semester 1",
+          acceptTerms: true,
+        },
+      });
+    };
+
+    const first = await makeRequest(tag("duplicate-one"));
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    const firstUser = await queryOne("SELECT id FROM users WHERE email = $1", [tag("duplicate-one")], "test:duplicateFirst");
+    createdUserIds.push(firstUser.id);
+    const second = await makeRequest(tag("duplicate-two"));
+    assert.equal(second.status, 409);
+  });
 });
 
 // ===========================================================================
@@ -676,6 +868,159 @@ describe("G. group owner-only operations", () => {
       body: { privacy: "INVITE_ONLY" },
     });
     assert.equal(afterTransfer.status, 403, "the former owner can no longer perform owner-only changes");
+  });
+
+  it("a plain member cannot edit ordinary group configuration", async () => {
+    const fx = await createGroupFixture();
+
+    const denied = await call("PATCH", `/api/study-groups/${fx.groupId}`, {
+      token: tokenFor(fx.member),
+      body: { name: "Member-owned rename" },
+    });
+    assert.equal(denied.status, 403);
+
+    const unchanged = await queryOne("SELECT name FROM study_groups WHERE id = $1", [fx.groupId], "test:memberGroupEdit");
+    assert.notEqual(unchanged.name, "Member-owned rename", "the member cannot rename the group");
+  });
+
+  it("requires ownership transfer before the owner can leave", async () => {
+    const fx = await createGroupFixture();
+
+    const denied = await call("POST", `/api/study-groups/${fx.groupId}/leave`, {
+      token: tokenFor(fx.owner),
+      body: { reason: "owner exit regression" },
+    });
+    assert.equal(denied.status, 409);
+
+    const state = await queryOne(
+      `SELECT g.owner_id, m.left_at
+         FROM study_groups g
+         JOIN study_group_members m ON m.group_id = g.id AND m.student_id = $2
+        WHERE g.id = $1`,
+      [fx.groupId, fx.owner.id],
+      "test:ownerLeaveState",
+    );
+    assert.equal(state.owner_id, fx.owner.id);
+    assert.equal(state.left_at, null);
+  });
+
+  it("resets a removed moderator to MEMBER when they rejoin", async () => {
+    const fx = await createGroupFixture();
+
+    await query(
+      `UPDATE study_group_members
+          SET role = 'MODERATOR', status = 'DEACTIVATED', left_at = now()
+        WHERE group_id = $1 AND student_id = $2`,
+      [fx.groupId, fx.moderator.id],
+      "test:removeModeratorForRejoin",
+    );
+    await query(
+      "UPDATE study_groups SET privacy = 'PUBLIC', require_approval = FALSE WHERE id = $1",
+      [fx.groupId],
+      "test:openGroupForRejoin",
+    );
+
+    const joined = await call("POST", `/api/study-groups/${fx.groupId}/join`, {
+      token: tokenFor(fx.moderator),
+      body: {},
+    });
+    assert.equal(joined.status, 202, JSON.stringify(joined.body));
+
+    const membership = await queryOne(
+      "SELECT role, status, left_at FROM study_group_members WHERE group_id = $1 AND student_id = $2",
+      [fx.groupId, fx.moderator.id],
+      "test:rejoinedModeratorRole",
+    );
+    assert.equal(membership.role, "MEMBER");
+    assert.equal(membership.status, "ACTIVE");
+    assert.equal(membership.left_at, null);
+  });
+
+  it("does not allow a group member to download another user's private file", async () => {
+    const fx = await createGroupFixture();
+    const resource = await createStoredResource({ workspaceId: fx.workspaceId, uploaderId: fx.owner.id });
+
+    const denied = await call(
+      "GET",
+      `/api/workspaces/${fx.workspaceId}/resources/${resource.id}/download`,
+      { token: tokenFor(fx.member) },
+    );
+    assert.equal(denied.status, 404);
+
+    const allowed = await call(
+      "GET",
+      `/api/workspaces/${fx.workspaceId}/resources/${resource.id}/download`,
+      { token: tokenFor(fx.owner) },
+    );
+    assert.equal(allowed.status, 200);
+  });
+
+  it("keeps closed-session RSVP restricted to invited participants", async () => {
+    const fx = await createGroupFixture();
+    const session = await queryOne(
+      `INSERT INTO study_sessions
+         (workspace_id, title, starts_at, ends_at, mode, agenda, participants_closed, created_by)
+       VALUES ($1, 'Closed authorization session', now() + interval '1 day',
+               now() + interval '1 day 1 hour', 'PHYSICAL', '', TRUE, $2)
+       RETURNING id`,
+      [fx.workspaceId, fx.owner.id],
+      "test:closedSession",
+    );
+
+    const legacyDenied = await call("POST", `/api/workspaces/${fx.workspaceId}/sessions/rsvp`, {
+      token: tokenFor(fx.member),
+      body: { sessionId: session.id, rsvp: "GOING" },
+    });
+    assert.equal(legacyDenied.status, 403);
+
+    const structuredDenied = await call("PATCH", `/api/sessions/${session.id}/rsvp`, {
+      token: tokenFor(fx.member),
+      body: { rsvp: "GOING" },
+    });
+    assert.equal(structuredDenied.status, 403);
+
+    const participant = await queryOne(
+      "SELECT 1 FROM session_participants WHERE session_id = $1 AND student_id = $2",
+      [session.id, fx.member.id],
+      "test:closedSessionParticipant",
+    );
+    assert.equal(participant, null);
+  });
+});
+
+describe("G2. workspace and AI child resources stay scope-bound", () => {
+  it("rejects a task that points at a plan in another workspace", async () => {
+    const first = await createGroupFixture();
+    const second = await createGroupFixture();
+    const foreignPlan = await queryOne(
+      `INSERT INTO study_plans (workspace_id, title, description, created_by)
+       VALUES ($1, 'Foreign authorization plan', '', $2)
+       RETURNING id`,
+      [second.workspaceId, second.owner.id],
+      "test:foreignPlan",
+    );
+
+    const denied = await call("POST", `/api/workspaces/${first.workspaceId}/tasks`, {
+      token: tokenFor(first.owner),
+      body: { title: "Cross-workspace task", planId: foreignPlan.id },
+    });
+    assert.equal(denied.status, 404);
+  });
+
+  it("requires active group membership when creating a group AI conversation", async () => {
+    const fx = await createGroupFixture();
+
+    const denied = await call("POST", "/api/ai/conversations", {
+      token: tokenFor(student),
+      body: { groupId: fx.groupId, kind: "GROUP", title: "Unauthorized group thread" },
+    });
+    assert.equal(denied.status, 404);
+
+    const allowed = await call("POST", "/api/ai/conversations", {
+      token: tokenFor(fx.member),
+      body: { groupId: fx.groupId, kind: "GROUP", title: "Authorized group thread" },
+    });
+    assert.equal(allowed.status, 201, JSON.stringify(allowed.body));
   });
 });
 
@@ -1051,10 +1396,10 @@ describe("L. administrator account changes invalidate sessions", () => {
   });
 
   it("revokes sessions on a role change", async () => {
-    const target = await createUser(ROLES.STUDENT, "role-edit");
+    const target = await createUser(ROLES.ADMIN, "role-edit");
     const response = await call("POST", `/api/admin/users/${target.id}/role`, {
       token: tokenFor(admin),
-      body: { role: ROLES.GROUP_LEADER, reason: "role session revocation test" },
+      body: { role: ROLES.STUDENT, reason: "role session revocation test" },
     });
     assert.equal(response.status, 200, JSON.stringify(response.body));
 

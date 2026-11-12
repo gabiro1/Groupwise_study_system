@@ -56,7 +56,7 @@ Local retrieval preserves the existing authorization-first design:
 - deleted and unextractable resources are excluded;
 - workspace messages require active membership and are read-only context;
 - global questions may use the current student's own courses, goals, groups,
-  upcoming sessions, and accepted study partners.
+  upcoming sessions, and active study groups.
 
 Retrieval is bounded keyword overlap over `extracted_text`/description. It does
 not claim embeddings or semantic search. If no authorized evidence exists, the

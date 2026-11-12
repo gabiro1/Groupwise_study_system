@@ -150,7 +150,7 @@ surface:
 - at least 500 recommendation requests
 - at least 10,000 labelled candidate rows
 - at least 100 positive outcomes and 100 negative outcomes
-- at least 20 groups or partner interactions
+- at least 20 group interactions
 - at least 5 represented courses
 - at least 3 distinct relevance labels
 
@@ -208,7 +208,7 @@ acceptance rate, click-through rate, helpful-feedback rate, group-join rate,
 reliability. Baseline and learned-model metrics use the same request population
 and time window whenever possible.
 
-Reports are split for partner versus group recommendations, complete versus
+Reports are split for group recommendation cohorts, complete versus
 incomplete profiles, courses, and academic levels when sample sizes support a
 meaningful and privacy-preserving comparison. Small subgroups are suppressed.
 The model can be activated only if it matches or beats the baseline on NDCG@5,
@@ -224,7 +224,7 @@ having an incomplete profile, and they do not receive a student-specific model.
 
 Personalization is a separate, bounded aggregate profile. It uses accepted and
 rejected recommendations, helpful feedback and reasons, preferred modes and
-times, group joining and retention, and repeated successful partner types. It
+times, group joining and retention, and repeated successful group patterns. It
 uses smoothing toward the population/default profile and requires at least five
 events before a dimension influences ranking. One rejection cannot cause a large
 change. The configured maximum adjustment applies to the final score and the

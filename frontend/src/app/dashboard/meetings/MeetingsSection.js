@@ -30,23 +30,27 @@ export function StatusChip({ status }) {
   return <span className={`status-chip ${String(status).toLowerCase()}`}>{label}</span>;
 }
 
-function MeetingCard({ meeting }) {
+function MeetingCard({ meeting, groupId }) {
+  const ownerGroupId = groupId || meeting.group_id;
+  const detailHref = ownerGroupId
+    ? `/dashboard/groups/${ownerGroupId}/meetings/${meeting.id}`
+    : `/dashboard/meetings/${meeting.id}`;
   return (
     <article className="meeting-card">
       <div className="meeting-card-top">
         <StatusChip status={meeting.status} />
         <span className="meeting-time">{formatMeetingTime(meeting.scheduled_start)}</span>
       </div>
-      <h3><Link href={`/dashboard/meetings/${meeting.id}`}>{meeting.title}</Link></h3>
+      <h3><Link href={detailHref}>{meeting.title}</Link></h3>
       <p className="meeting-group">
         {meeting.group_name} · {meeting.expected_duration_minutes} min
         {meeting.provider === "GOOGLE_MEET" && " · Google Meet"}
       </p>
-      <Link className="button button-secondary" href={`/dashboard/meetings/${meeting.id}`}>View details</Link>
+      <Link className="button button-secondary" href={detailHref}>View details</Link>
     </article>
   );
 }
-export default function MeetingsSection({ leadGroups }) {
+export default function MeetingsSection({ leadGroups, groupId = null, group = null }) {
   const [meetings, setMeetings] = useState([]);
   const [groups, setGroups] = useState([]);
   const [filter, setFilter] = useState("all");
@@ -60,21 +64,28 @@ export default function MeetingsSection({ leadGroups }) {
     setLoading(true);
     setError("");
     try {
-      const [meetingData, groupData] = await Promise.all([
-        api(`meetings?scope=${filter}&limit=100`),
-        api("study-groups/mine").catch(() => ({ groups: [] })),
-      ]);
+      const [meetingData, groupData] = await Promise.all(groupId
+        ? [
+            api(`meetings/group/${groupId}?scope=${filter}&limit=100`),
+            Promise.resolve({ groups: group ? [group] : [] }),
+          ]
+        : [
+            api(`meetings?scope=${filter}&limit=100`),
+            api("study-groups/mine").catch(() => ({ groups: [] })),
+          ]);
       setMeetings(meetingData.meetings || []);
       setGroups(groupData.groups || groupData || []);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
-  }, [filter]);
+  }, [filter, groupId, group]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on mount/filter change
   useEffect(() => { refresh(); }, [refresh]);
 
-  const canSchedule = (leadGroups?.length || 0) > 0
-    || groups.some((g) => ["OWNER", "MODERATOR"].includes(g.myRole || g.my_role));
+  const canSchedule = groupId
+    ? Boolean(group?.viewer?.canModerate || ["OWNER", "MODERATOR"].includes(group?.viewer?.role || group?.myRole || group?.my_role))
+    : (leadGroups?.length || 0) > 0
+      || groups.some((g) => ["OWNER", "MODERATOR"].includes(g.myRole || g.my_role));
   const scheduleGroups = useMemo(() => {
     const led = new Set((leadGroups || []).map((g) => g.id));
     return groups.filter((g) => led.has(g.id) || ["OWNER", "MODERATOR"].includes(g.myRole || g.my_role));
@@ -105,7 +116,7 @@ export default function MeetingsSection({ leadGroups }) {
       <div className="section-page-heading">
         <span className="section-overline">MEET FACE TO FACE</span>
         <h1 id="meetings-heading">Video meetings</h1>
-        <p>Schedule Jitsi video calls for your study groups, then join from here.</p>
+       <p>Schedule video calls for this study group, then join from here.</p>
       </div>
       <div className="meetings-toolbar">
         <div className="meetings-filters" role="group" aria-label="Filter meetings">
@@ -144,11 +155,11 @@ export default function MeetingsSection({ leadGroups }) {
       )}
       {!loading && !error && meetings.length > 0 && (
         <section className="panel section-panel" aria-label="Meetings">
-          <div className="meeting-grid">{list.map((m) => <MeetingCard key={m.id} meeting={m} />)}</div>
+           <div className="meeting-grid">{list.map((m) => <MeetingCard key={m.id} meeting={m} groupId={groupId} />)}</div>
           {filter === "all" && past.length > 0 && (
             <>
               <div className="section-heading"><div><span className="section-overline">HISTORY</span><h2>Recently completed</h2></div></div>
-              <div className="meeting-grid">{past.slice(0, 6).map((m) => <MeetingCard key={m.id} meeting={m} />)}</div>
+               <div className="meeting-grid">{past.slice(0, 6).map((m) => <MeetingCard key={m.id} meeting={m} groupId={groupId} />)}</div>
             </>
           )}
         </section>

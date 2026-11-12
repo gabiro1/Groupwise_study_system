@@ -28,9 +28,8 @@ export function isLiveKitConfigured() {
 /**
  * Issue a short-lived token for the given session room.
  *
- * `metadata` carries the display role (STUDENT/GROUP_LEADER) so the meeting UI
- * can show who may present; the LiveKit ACL keeps participants subscriber-level
- * by default.
+ * `metadata` carries the session display role so the meeting UI can show who may
+ * present; the LiveKit ACL keeps participants subscriber-level by default.
  */
 export async function meetingTokenFor(user, sessionId, grants = {}) {
   if (!env.livekitConfigured) {
@@ -72,17 +71,16 @@ export async function meetingTokenFor(user, sessionId, grants = {}) {
  */
 export async function authorizationForMeeting(sessionId, userId) {
   const session = await queryOne(
-    `SELECT s.id, s.workspace_id, s.meeting_room, s.status, s.participants_closed,
-            w.group_id, w.is_archived,
+    `SELECT s.id, s.group_id, s.meeting_room, s.status, s.participants_closed,
             (SELECT count(*)::int FROM session_participants p WHERE p.session_id = s.id AND p.student_id = $2) AS is_invited
        FROM study_sessions s
-       JOIN workspaces w ON w.id = s.workspace_id
+       JOIN study_groups g ON g.id = s.group_id AND g.status = 'ACTIVE'
       WHERE s.id = $1`,
     [sessionId, userId],
     "sessions:meetingAuth",
   );
 
-  if (!session || session.is_archived) throw new ForbiddenError("That session does not exist.");
+  if (!session) throw new ForbiddenError("That session does not exist.");
   if (session.status === "CANCELLED" || session.status === "COMPLETED") {
     throw new ForbiddenError("That session is not running.");
   }

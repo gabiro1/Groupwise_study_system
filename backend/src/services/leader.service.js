@@ -157,18 +157,15 @@ export async function listLeaderSessions(actorId, { groupId, scope = "upcoming",
 
   const sessions = await queryRows(
     `SELECT s.id, s.title, s.starts_at, s.ends_at, s.mode, s.location, s.meeting_url,
-            s.status, s.attendance_tracked,
-            g.id AS group_id, g.name AS group_name, g.slug,
-            w.id AS workspace_id,
-            (SELECT count(*)::int FROM session_participants p
+             s.status, s.attendance_tracked,
+             g.id AS group_id, g.name AS group_name, g.slug,
+             (SELECT count(*)::int FROM session_participants p
               WHERE p.session_id = s.id AND p.rsvp = 'GOING') AS going_count,
             (SELECT count(*)::int FROM study_group_members m2
                WHERE m2.group_id = g.id AND m2.left_at IS NULL AND m2.status = 'ACTIVE') AS member_count
-       FROM study_sessions s
-       JOIN workspaces w ON w.id = s.workspace_id
-       JOIN workspace_groups wg ON wg.workspace_id = w.id
-       JOIN study_groups g ON g.id = wg.group_id
-       WHERE NOT w.is_archived AND ${clauses.join(" AND ")}
+        FROM study_sessions s
+        JOIN study_groups g ON g.id = s.group_id
+        WHERE ${clauses.join(" AND ")}
       ORDER BY ${scope === "past" ? "s.starts_at DESC" : "s.starts_at ASC"}
       LIMIT $${params.length}`,
     params,
@@ -214,10 +211,8 @@ export async function groupAnalytics(groupId, actorId, { days = 30 } = {}) {
               count(*) FILTER (WHERE s.status = 'SCHEDULED' AND s.starts_at > now())::int AS upcoming,
               count(*) FILTER (WHERE s.status = 'COMPLETED')::int AS completed,
               count(*) FILTER (WHERE s.status = 'CANCELLED')::int AS cancelled
-             FROM study_sessions s
-             JOIN workspaces w ON w.id = s.workspace_id
-         WHERE NOT w.is_archived
-           AND EXISTS (SELECT 1 FROM workspace_groups wg WHERE wg.workspace_id = w.id AND wg.group_id = $1)`,
+              FROM study_sessions s
+         WHERE s.group_id = $1`,
       [groupId],
       "leader:analyticsSessions",
     ),
@@ -227,18 +222,14 @@ export async function groupAnalytics(groupId, actorId, { days = 30 } = {}) {
               count(*) FILTER (WHERE t.status <> 'COMPLETED'
                                  AND t.due_at IS NOT NULL AND t.due_at < now())::int AS overdue
           FROM tasks t
-          JOIN workspaces w ON w.id = t.workspace_id
-         WHERE NOT w.is_archived
-           AND EXISTS (SELECT 1 FROM workspace_groups wg WHERE wg.workspace_id = w.id AND wg.group_id = $1)`,
+         WHERE t.group_id = $1`,
       [groupId],
       "leader:analyticsTasks",
     ),
     queryOne(
       `SELECT count(*)::int AS messages
           FROM messages msg
-          JOIN workspaces w ON w.id = msg.workspace_id
-         WHERE NOT w.is_archived
-           AND EXISTS (SELECT 1 FROM workspace_groups wg WHERE wg.workspace_id = w.id AND wg.group_id = $1)
+         WHERE msg.group_id = $1
            AND msg.deleted_at IS NULL
           AND msg.created_at > now() - ($2 || ' days')::interval`,
       [groupId, window],
@@ -258,9 +249,7 @@ export async function groupAnalytics(groupId, actorId, { days = 30 } = {}) {
             count(*) FILTER (WHERE p.attended IS TRUE)::int AS attended
        FROM session_participants p
         JOIN study_sessions s ON s.id = p.session_id
-        JOIN workspaces w ON w.id = s.workspace_id
-       WHERE NOT w.is_archived
-         AND EXISTS (SELECT 1 FROM workspace_groups wg WHERE wg.workspace_id = w.id AND wg.group_id = $1)`,
+       WHERE s.group_id = $1`,
     [groupId],
     "leader:analyticsAttendance",
   );
@@ -310,28 +299,17 @@ export async function postAnnouncement(groupId, actorId, { title, body }) {
     "leader:announcementRecipients",
   );
 
-  const workspace = await queryOne(
-    `SELECT w.id FROM workspace_groups wg
-       JOIN workspaces w ON w.id = wg.workspace_id
-      WHERE wg.group_id = $1 AND NOT w.is_archived
-      ORDER BY wg.assigned_at DESC LIMIT 1`,
-    [groupId],
-    "leader:announcementWorkspace",
+  await query(
+    `INSERT INTO messages (group_id, author_id, kind, body, metadata)
+     VALUES ($1, $2, 'SYSTEM', $3, $4)`,
+    [
+      groupId,
+      actorId,
+      `Announcement: ${title}\n\n${body}`,
+      JSON.stringify({ announcement: true, title }),
+    ],
+    "leader:announcementMessage",
   );
-
-  if (workspace) {
-    await query(
-      `INSERT INTO messages (workspace_id, author_id, kind, body, metadata)
-       VALUES ($1, $2, 'SYSTEM', $3, $4)`,
-      [
-        workspace.id,
-        actorId,
-        `Announcement: ${title}\n\n${body}`,
-        JSON.stringify({ announcement: true, title }),
-      ],
-      "leader:announcementMessage",
-    );
-  }
 
   await query(
     `INSERT INTO group_activity_events (group_id, actor_id, event_type, entity_type, metadata)
@@ -355,7 +333,6 @@ export async function postAnnouncement(groupId, actorId, { title, body }) {
     posted: true,
     groupId,
     notified: recipients.length,
-    workspaceId: workspace?.id ?? null,
   };
 }
 

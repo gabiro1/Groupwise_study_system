@@ -38,7 +38,7 @@
 - [x] Preferred group-size range.
 - [x] Preferred study-session duration.
 - [x] Weekly study goal.
-- [x] Free-text partner preferences.
+- [x] Free-text collaboration preferences.
 - [x] Weekly availability slots.
 - [x] Topic strengths and self-ratings.
 - [x] Skills a student can teach or wants to develop.
@@ -52,7 +52,6 @@
 
 ### Recommendation and matching system
 
-- [x] Recommendations for study partners.
 - [x] Recommendations for study groups.
 - [x] Course compatibility scoring.
 - [x] Skill complementarity scoring.
@@ -150,12 +149,11 @@ Required decision:
   - [ ] Rerun session integration tests using a reliable test database.
   - [ ] Verify participant privacy and permission boundaries in a browser.
 
-### Partner communication and notifications
+### Group collaboration and notifications
 
-- [x] Study-partner invitations.
-- [x] Accept, decline, and withdraw partner invitations.
-- [x] Private partner conversations.
-- [x] Direct messages.
+- [x] Group invitations.
+- [x] Accept, decline, and withdraw group invitations.
+- [x] Group discussions and session messages.
 - [x] Workspace messages.
 - [x] Notifications inbox.
 - [x] Notification preferences.
@@ -361,7 +359,7 @@ Required decision:
 - [ ] Explain the weighted matching formula and every weight.
 - [ ] Explain complementarity between strengths and weaknesses.
 - [ ] Explain how incomplete profile data affects recommendation confidence.
-- [ ] Document group recommendations separately from partner recommendations.
+- [ ] Document the group recommendation journey and scoring separately from general student discovery.
 - [ ] Document recommendation acceptance, rejection, and feedback tracking.
 - [ ] Add database schema screenshots or diagrams.
 - [ ] Add student-facing interface screenshots.

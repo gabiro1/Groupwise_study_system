@@ -6,7 +6,7 @@ import { aiLimiter } from "../middleware/rateLimit.js";
 import logger from "../config/logger.js";
 import { queryRows, queryOne } from "../config/db.js";
 import { NotFoundError } from "../lib/errors.js";
-import { assertWorkspaceAccess } from "../services/workspace.service.js";
+import { assertMember } from "../services/group.service.js";
 import { aiStatus, parseNaturalLanguage } from "../services/ai.service.js";
 import { aiRuntime } from "../services/settings.service.js";
 import { recordAiUsage, recordWebSearchAudit } from "../services/aiConfig.service.js";
@@ -183,9 +183,9 @@ router.post(
   validate({ body: aiChatSchema }),
   asyncHandler(async (req, res) => {
     const {
-      workspaceId,
-      message,
-      resourceIds,
+      groupId,
+       message,
+       resourceIds,
       useGroupContext,
       sourceMode: requestedSourceMode,
       researchOptions,
@@ -194,6 +194,12 @@ router.post(
     const webPolicy = await getWebSearchPolicy();
     const sourceMode = requestedSourceMode ?? webPolicy.defaultMode;
     const startedAt = Date.now();
+
+    // Authorisation happens before provider checks or retrieval, never after:
+    // even an unavailable assistant must not reveal whether a group is readable.
+    if (groupId) {
+      await assertMember(groupId, req.user.id);
+    }
 
     const providerReady = (await getTargetsAsync()).length > 0;
     if (!providerReady || !runtime.assistantEnabled) {
@@ -211,17 +217,13 @@ router.post(
       });
     }
 
-    // Authorisation happens before retrieval, never after: the prompt is only
-    // built from context this student may already read.
-    if (workspaceId) {
-      await assertWorkspaceAccess(workspaceId, req.user.id);
-    }
+    const contextGroupId = useGroupContext ? groupId : null;
 
     const needsLocal = sourceMode !== "WEB";
     const context = needsLocal
       ? await gatherContext({
           userId: req.user.id,
-          workspaceId: useGroupContext ? workspaceId : null,
+          groupId: contextGroupId,
           resourceIds,
           message,
         })
@@ -290,7 +292,7 @@ router.post(
         available: true,
         answer: null,
         reason: "NO_CONTEXT",
-        message: workspaceId
+        message: contextGroupId
           ? "No reliable source was found. Your group has no material I can read yet."
           : "No reliable source was found for that question.",
         sourceMode,
@@ -497,12 +499,12 @@ async function loadEligible(studentId, body) {
 /**
  * Gather the text this student is allowed to use as context.
  *
- * Access control is expressed in SQL: workspace resources are limited to
- * workspaces the student belongs to, and course resources to courses they are
- * enrolled in or teach. There is no code path that fetches a resource first and
+ * Access control is expressed in SQL: group resources are limited to the active
+ * group member's group, and global resources are limited to groups/courses the
+ * student may read. There is no code path that fetches a resource first and
  * checks permission afterwards.
  */
-async function gatherContext({ userId, workspaceId, resourceIds, message }) {
+async function gatherContext({ userId, groupId, resourceIds, message }) {
   const params = [userId];
   const bind = (value) => {
     params.push(value);
@@ -513,33 +515,39 @@ async function gatherContext({ userId, workspaceId, resourceIds, message }) {
     `r.is_deleted = FALSE`,
     `r.extraction_status IN ('COMPLETE', 'SKIPPED')`,
     `(r.visibility <> 'PRIVATE' OR r.uploaded_by = $1)`,
-    // Student-authored scope: a group the student is an active member of, or a
-    // course they are enrolled in.
-    `(
-       (r.workspace_id IS NOT NULL AND EXISTS (
-           SELECT 1
-             FROM workspace_groups wg
-             JOIN workspaces rw ON rw.id = wg.workspace_id AND NOT rw.is_archived
-             JOIN study_groups g ON g.id = wg.group_id AND g.status = 'ACTIVE'
-             JOIN study_group_members m ON m.group_id = g.id
-           WHERE wg.workspace_id = r.workspace_id AND m.student_id = ${bind(userId)}
-             AND m.left_at IS NULL AND m.status = 'ACTIVE'))
-       OR
-       (r.course_id IS NOT NULL AND EXISTS (
-          SELECT 1 FROM student_courses sc
-           WHERE sc.course_id = r.course_id AND sc.student_id = ${bind(userId)} AND sc.is_active))
-    )`,
   ];
 
-  if (workspaceId) {
-    resourceClauses.push(`r.workspace_id = ${bind(workspaceId)}`);
+  if (groupId) {
+    resourceClauses.push(`r.group_id = ${bind(groupId)}`);
+    resourceClauses.push(`EXISTS (
+      SELECT 1 FROM study_groups g
+       JOIN study_group_members m ON m.group_id = g.id
+      WHERE g.id = r.group_id AND g.status = 'ACTIVE'
+        AND m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
+    )`);
+  } else {
+    // Global assistant context is still authorized, but it may span the student's
+    // active groups and enrolled courses rather than one caller-selected group.
+    resourceClauses.push(`(
+      (r.group_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM study_groups g
+         JOIN study_group_members m ON m.group_id = g.id
+        WHERE g.id = r.group_id AND g.status = 'ACTIVE'
+          AND m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
+      ))
+      OR
+      (r.course_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM student_courses sc
+         WHERE sc.course_id = r.course_id AND sc.student_id = $1 AND sc.is_active
+      ))
+    )`);
   }
   if (resourceIds.length) {
     resourceClauses.push(`r.id = ANY(${bind(resourceIds)}::uuid[])`);
   }
 
   const resources = await queryRows(
-    `SELECT r.id, r.title, r.description, r.kind, r.topic_id, r.workspace_id, r.course_id,
+    `SELECT r.id, r.title, r.description, r.kind, r.topic_id, r.group_id, r.course_id,
             left(coalesce(r.extracted_text, r.description), 2000) AS text
        FROM resources r
       WHERE ${resourceClauses.join(" AND ")}
@@ -549,24 +557,22 @@ async function gatherContext({ userId, workspaceId, resourceIds, message }) {
     "ai:resources",
   );
 
-  const recentMessages = workspaceId
-     ? await queryRows(
-         `SELECT DISTINCT m.id, m.body, m.kind, m.created_at, u.first_name
-            FROM messages m
-            LEFT JOIN users u ON u.id = m.author_id
-            JOIN workspaces w ON w.id = m.workspace_id AND NOT w.is_archived
-            JOIN workspace_groups wg ON wg.workspace_id = w.id
-            JOIN study_groups g ON g.id = wg.group_id AND g.status = 'ACTIVE'
-           WHERE m.workspace_id = $1 AND m.deleted_at IS NULL AND m.kind <> 'AI'
-             AND EXISTS (
-               SELECT 1 FROM study_group_members gm
-                WHERE gm.group_id = g.id AND gm.student_id = $2
-                  AND gm.left_at IS NULL AND gm.status = 'ACTIVE'
-             )
-           ORDER BY m.created_at DESC LIMIT 15`,
-         [workspaceId, userId],
-         "ai:groupMessages",
-       )
+  const recentMessages = groupId
+    ? await queryRows(
+        `SELECT DISTINCT m.id, m.body, m.kind, m.created_at, u.first_name
+           FROM messages m
+           LEFT JOIN users u ON u.id = m.author_id
+           JOIN study_groups g ON g.id = m.group_id AND g.status = 'ACTIVE'
+          WHERE m.group_id = $1 AND m.deleted_at IS NULL AND m.kind <> 'AI'
+            AND EXISTS (
+              SELECT 1 FROM study_group_members gm
+               WHERE gm.group_id = g.id AND gm.student_id = $2
+                 AND gm.left_at IS NULL AND gm.status = 'ACTIVE'
+            )
+          ORDER BY m.created_at DESC LIMIT 15`,
+        [groupId, userId],
+        "ai:groupMessages",
+      )
     : [];
 
   // Relevance is a simple keyword overlap, not a vector search: with a handful of
@@ -581,11 +587,11 @@ async function gatherContext({ userId, workspaceId, resourceIds, message }) {
     .sort((a, b) => b.score - a.score)
     .slice(0, 6);
 
-  // A workspace-scoped question is already narrowly grounded. The global
-  // assistant (no workspaceId) instead gets a factual snapshot of the student's
+  // A group-scoped question is already narrowly grounded. The global assistant
+  // (no groupId) instead gets a factual snapshot of the student's
   // own platform activity, so it can answer "what groups am I in?" without the
   // model inventing anything.
-  const platformContext = workspaceId ? [] : await buildPlatformSnapshot(userId);
+  const platformContext = groupId ? [] : await buildPlatformSnapshot(userId);
 
   return { resources, chunks, recentMessages: recentMessages.reverse(), platformContext };
 }
@@ -594,13 +600,13 @@ async function gatherContext({ userId, workspaceId, resourceIds, message }) {
  * Assemble a plain-text snapshot of the student's own platform facts.
  *
  * This is deliberately derived from the database, never from the model: groups,
- * upcoming sessions, connected partners, courses, and the stated study goal. A
+ * upcoming sessions, courses, and the stated study goal. A
  * query failure must not break chat, so the whole thing degrades to an empty
  * snapshot and logs.
  */
 async function buildPlatformSnapshot(userId) {
   try {
-    const [groups, sessions, partners, courses, goals] = await Promise.all([
+    const [groups, sessions, courses, goals] = await Promise.all([
       queryRows(
         `SELECT g.name, c.course_code, g.member_count
            FROM study_group_members m
@@ -614,28 +620,16 @@ async function buildPlatformSnapshot(userId) {
         "ai:snapshotGroups",
       ),
       queryRows(
-        `SELECT ss.title, ss.starts_at, ss.mode, g.name AS group_name
-           FROM study_sessions ss
-           JOIN workspaces w ON w.id = ss.workspace_id
-           JOIN workspace_groups wg ON wg.workspace_id = w.id
-           JOIN study_groups g ON g.id = wg.group_id AND g.status = 'ACTIVE'
-           JOIN study_group_members m ON m.group_id = g.id
-                AND m.student_id = $1 AND m.status = 'ACTIVE' AND m.left_at IS NULL
-          WHERE NOT w.is_archived AND ss.starts_at >= now() AND ss.status = 'SCHEDULED'
+       `SELECT ss.title, ss.starts_at, ss.mode, g.name AS group_name
+          FROM study_sessions ss
+          JOIN study_groups g ON g.id = ss.group_id AND g.status = 'ACTIVE'
+          JOIN study_group_members m ON m.group_id = g.id
+               AND m.student_id = $1 AND m.status = 'ACTIVE' AND m.left_at IS NULL
+          WHERE ss.starts_at >= now() AND ss.status = 'SCHEDULED'
           ORDER BY ss.starts_at ASC
           LIMIT 5`,
         [userId],
         "ai:snapshotSessions",
-      ),
-      queryRows(
-        `SELECT u.first_name, u.last_name
-           FROM partner_connections pc
-           JOIN users u ON u.id = CASE WHEN pc.requester_id = $1 THEN pc.recipient_id ELSE pc.requester_id END
-          WHERE pc.status = 'ACCEPTED' AND (pc.requester_id = $1 OR pc.recipient_id = $1)
-          ORDER BY pc.responded_at DESC NULLS LAST
-          LIMIT 15`,
-        [userId],
-        "ai:snapshotPartners",
       ),
       queryRows(
         `SELECT c.course_code, c.name
@@ -672,10 +666,6 @@ async function buildPlatformSnapshot(userId) {
     if (sessions.length) {
       lines.push(`- Upcoming sessions: ${sessions.map((session) => `${session.title} (${new Date(session.starts_at).toISOString()}, ${session.group_name})`).join("; ")}`);
     }
-    if (partners.length) {
-      lines.push(`- Connected study partners: ${partners.map((partner) => [partner.first_name, partner.last_name].filter(Boolean).join(" ")).join(", ")}`);
-    }
-
     return lines;
   } catch (error) {
     logger.warn("AI platform snapshot failed", { userId, message: error.message });
@@ -752,22 +742,24 @@ async function summariseResource(resource, { timeoutMs } = {}) {
 /** Load one resource the student may read, or null. */
 async function loadAccessibleResource(userId, resourceId) {
   return queryOne(
-      `SELECT r.* FROM resources r
-       LEFT JOIN workspaces w ON w.id = r.workspace_id
-       WHERE r.id = $1 AND r.is_deleted = FALSE
-         AND (r.visibility <> 'PRIVATE' OR r.uploaded_by = $2)
-         AND (
-         (r.workspace_id IS NOT NULL AND w.is_archived = FALSE AND EXISTS (
-            SELECT 1
-             FROM workspace_groups wg
-             JOIN study_groups g ON g.id = wg.group_id AND g.status = 'ACTIVE'
+    `SELECT r.id, r.title, r.description, r.kind, r.extracted_text,
+            r.group_id, r.course_id, r.visibility, r.uploaded_by
+       FROM resources r
+      WHERE r.id = $1 AND r.is_deleted = FALSE
+        AND (r.visibility <> 'PRIVATE' OR r.uploaded_by = $2)
+        AND (
+          (r.group_id IS NOT NULL AND EXISTS (
+            SELECT 1 FROM study_groups g
              JOIN study_group_members m ON m.group_id = g.id
-            WHERE wg.workspace_id = r.workspace_id AND m.student_id = $2
-              AND m.left_at IS NULL AND m.status = 'ACTIVE'))
-        OR
-         (r.course_id IS NOT NULL AND EXISTS (
-            SELECT 1 FROM student_courses sc WHERE sc.course_id = r.course_id AND sc.student_id = $2 AND sc.is_active))
-       )`,
+            WHERE g.id = r.group_id AND g.status = 'ACTIVE'
+              AND m.student_id = $2 AND m.left_at IS NULL AND m.status = 'ACTIVE'
+          ))
+          OR
+          (r.course_id IS NOT NULL AND EXISTS (
+            SELECT 1 FROM student_courses sc
+             WHERE sc.course_id = r.course_id AND sc.student_id = $2 AND sc.is_active
+          ))
+        )`,
     [resourceId, userId],
     "ai:loadResource",
   );

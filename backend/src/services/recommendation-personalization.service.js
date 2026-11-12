@@ -114,7 +114,7 @@ async function readHistory(studentId) {
        JOIN recommendation_requests rr ON rr.id = r.request_id
        LEFT JOIN recommendation_feedback rf ON rf.recommendation_id = r.id
        LEFT JOIN group_membership_outcomes mo ON mo.recommendation_id = r.id
-       LEFT JOIN group_feedback gf ON gf.workspace_id = mo.workspace_id AND gf.student_id = r.student_id
+       LEFT JOIN group_feedback gf ON gf.group_id = mo.group_id AND gf.student_id = r.student_id
       WHERE r.student_id = $1 AND rr.created_at < now()
       ORDER BY rr.created_at DESC
       LIMIT 500`,

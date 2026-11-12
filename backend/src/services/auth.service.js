@@ -1,4 +1,4 @@
-import { query, queryOne, withTransaction } from "../config/db.js";
+import { query, queryOne, queryRows, withTransaction } from "../config/db.js";
 import env from "../config/env.js";
 import { ROLES, USER_STATUS } from "../config/constants.js";
 import {
@@ -28,6 +28,7 @@ import { recordAudit, AUDIT } from "../lib/audit.js";
 import logger from "../config/logger.js";
 import { sendMail } from "./mailer.js";
 import { registrationPolicy } from "./settings.service.js";
+import { normalizeLoginIdentifier, normalizeRegistrationNumber } from "../lib/identifiers.js";
 
 /**
  * Authentication service.
@@ -59,6 +60,10 @@ function publicUser(row) {
     role: row.role,
     status: row.status,
     emailVerified: Boolean(row.email_verified_at),
+    registrationNumber: row.student_number ? normalizeRegistrationNumber(row.student_number) : null,
+    registrationNumberVerified: Boolean(row.registration_number_verified_at),
+    admissionYear: row.admission_year ?? null,
+    currentSemester: row.current_semester ?? null,
     lastLoginAt: row.last_login_at,
     createdAt: row.created_at,
   };
@@ -82,8 +87,22 @@ async function seedUserDefaults(tx, userId) {
  * Only STUDENT is accepted; the route-level schema enforces this so an
  * attacker cannot register themselves as an admin.
  */
-export async function register({ email, password, firstName, lastName, universityId, programId, yearOfStudy }, { req, actor } = {}) {
+export async function register({
+  email,
+  password,
+  firstName,
+  lastName,
+  registrationNumber,
+  universityId,
+  facultyId,
+  departmentId,
+  programId,
+  admissionYear,
+  yearOfStudy,
+  currentSemester,
+}, { req, actor } = {}) {
   const normalisedEmail = email.trim().toLowerCase();
+  const normalizedRegistrationNumber = normalizeRegistrationNumber(registrationNumber);
 
   // Registration policy is operator-controlled, never client-controlled. It is
   // checked before any expensive hashing so a closed platform costs nothing.
@@ -122,9 +141,40 @@ export async function register({ email, password, firstName, lastName, universit
       throw new ConflictError("An account already exists with that email address. Try signing in instead.");
     }
 
-    if (universityId) {
-      const university = await tx.queryOne("SELECT id FROM universities WHERE id = $1", [universityId], "auth:university");
-      if (!university) throw new AppError("Select a university from the list.", { status: 422, code: "INVALID_UNIVERSITY" });
+    const academic = await tx.queryOne(
+      `SELECT p.id AS program_id, d.id AS department_id, f.id AS faculty_id, f.university_id
+         FROM programs p
+         JOIN departments d ON d.id = p.department_id
+         JOIN faculties f ON f.id = d.faculty_id
+        WHERE p.id = $1 AND f.university_id = $2`,
+      [programId, universityId],
+      "auth:academicPath",
+    );
+    if (!academic) {
+      throw new AppError("Select a programme from the selected university.", {
+        status: 422,
+        code: "INVALID_ACADEMIC_PATH",
+        fields: { programId: "That programme does not belong to the selected university." },
+      });
+    }
+    if (facultyId && facultyId !== academic.faculty_id) {
+      throw new AppError("Select a faculty from the selected university.", { status: 422, code: "INVALID_ACADEMIC_PATH" });
+    }
+    if (departmentId && departmentId !== academic.department_id) {
+      throw new AppError("Select a department from the selected faculty.", { status: 422, code: "INVALID_ACADEMIC_PATH" });
+    }
+
+    const existingRegistration = await tx.queryOne(
+      `SELECT user_id FROM student_profiles
+        WHERE regexp_replace(upper(student_number::text), '\\s+', '', 'g') = $1`,
+      [normalizedRegistrationNumber],
+      "auth:existingRegistrationNumber",
+    );
+    if (existingRegistration) {
+      throw new ConflictError("That registration number is already registered.", {
+        code: "REGISTRATION_NUMBER_TAKEN",
+        fields: { registrationNumber: "Use your official registration number." },
+      });
     }
 
     const user = await tx.queryOne(
@@ -143,26 +193,13 @@ export async function register({ email, password, firstName, lastName, universit
       "auth:insert",
     );
 
-    if (programId) {
-      await tx.query(
-        `INSERT INTO student_profiles (user_id, university_id, program_id, year_of_study)
-         VALUES ($1, $2, $3, $4)`,
-        [user.id, universityId, programId, yearOfStudy ?? 1],
-        "auth:profile",
-      );
-    } else if (universityId) {
-      await tx.query(
-        "INSERT INTO student_profiles (user_id, university_id, year_of_study) VALUES ($1, $2, $3)",
-        [user.id, universityId, yearOfStudy ?? 1],
-        "auth:profile",
-      );
-    } else {
-      await tx.query(
-        "INSERT INTO student_profiles (user_id) VALUES ($1)",
-        [user.id],
-        "auth:profile",
-      );
-    }
+    await tx.query(
+      `INSERT INTO student_profiles
+         (user_id, university_id, program_id, year_of_study, student_number, admission_year, current_semester)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [user.id, universityId, programId, yearOfStudy, normalizedRegistrationNumber, admissionYear, currentSemester],
+      "auth:profile",
+    );
 
     await tx.query(
       `INSERT INTO study_preferences (student_id) VALUES ($1) ON CONFLICT DO NOTHING`,
@@ -186,7 +223,14 @@ export async function register({ email, password, firstName, lastName, universit
       "auth:registerSession",
     );
 
-    const authenticatedUser = { ...user, role: role.key };
+    const authenticatedUser = {
+      ...user,
+      role: role.key,
+      student_number: normalizedRegistrationNumber,
+      registration_number_verified_at: null,
+      admission_year: admissionYear,
+      current_semester: currentSemester,
+    };
     const accessToken = signAccessToken({
       userId: user.id,
       role: role.key,
@@ -321,25 +365,33 @@ export async function resendVerification(email) {
  * @throws {InvalidCredentialsError} for every credential failure mode.
  * @throws {AccountLockedError} when the account is locked out.
  */
-export async function login({ email: rawEmail, password: plaintext, rememberDevice = true }, { req } = {}) {
-  const normalisedEmail = rawEmail.trim().toLowerCase();
+export async function login({ identifier: rawIdentifier, email: legacyEmail, password: plaintext, rememberDevice = true }, { req } = {}) {
+  const identifier = normalizeLoginIdentifier(rawIdentifier ?? legacyEmail);
 
-  const user = await queryOne(
+  const matches = await queryRows(
     `SELECT u.id, u.email, u.password_hash, u.first_name, u.last_name, u.avatar_url,
             u.status, u.email_verified_at, u.failed_login_count, u.locked_until,
-            u.last_login_at, u.created_at, u.role_id, r.key AS role
+            u.last_login_at, u.created_at, u.role_id, u.staff_identifier, r.key AS role,
+            sp.student_number, sp.admission_year, sp.current_semester, sp.registration_number_verified_at
        FROM users u
        JOIN roles r ON r.id = u.role_id
-      WHERE u.email = $1 AND u.deleted_at IS NULL`,
-    [normalisedEmail],
+       LEFT JOIN student_profiles sp ON sp.user_id = u.id
+      WHERE u.deleted_at IS NULL
+        AND (
+          u.email = $1
+          OR regexp_replace(upper(sp.student_number::text), '\\s+', '', 'g') = $1
+          OR regexp_replace(upper(u.staff_identifier::text), '\\s+', '', 'g') = $1
+        )`,
+    [identifier],
     "auth:loginLookup",
   );
+  const user = matches.length === 1 ? matches[0] : null;
 
   // Unknown account: still perform a bcrypt comparison against a dummy hash so
   // the response time does not reveal whether the address is registered.
   if (!user) {
     await verifyPassword(plaintext, null);
-    await recordAudit({ action: AUDIT.AUTH_LOGIN_FAILED, entityType: "USER", metadata: { reason: "unknown_email" }, req });
+     await recordAudit({ action: AUDIT.AUTH_LOGIN_FAILED, entityType: "USER", metadata: { reason: "unknown_identifier" }, req });
     throw new InvalidCredentialsError();
   }
 
@@ -465,10 +517,13 @@ export async function refresh({ refreshToken }, { req } = {}) {
   const session = await queryOne(
     `SELECT s.id, s.user_id, s.expires_at, s.revoked_at,
             u.email, u.first_name, u.last_name, u.avatar_url, u.status,
-            u.email_verified_at, u.role_id, u.last_login_at, u.created_at, r.key AS role
+            u.email_verified_at, u.role_id, u.last_login_at, u.created_at, r.key AS role,
+            sp.student_number, sp.admission_year, sp.current_semester,
+            sp.registration_number_verified_at
        FROM auth_sessions s
        JOIN users u ON u.id = s.user_id AND u.deleted_at IS NULL
        JOIN roles r ON r.id = u.role_id
+       LEFT JOIN student_profiles sp ON sp.user_id = u.id
       WHERE s.refresh_token_hash = $1`,
     [hash],
     "auth:refreshLookup",

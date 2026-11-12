@@ -19,7 +19,7 @@ process.env.WRITE_RATE_LIMIT_MAX = "100000";
 process.env.LOG_LEVEL = "silent";
 
 const { createApp } = await import("../src/config/app.js");
-const { pool, query, queryOne, closePool } = await import("../src/config/db.js");
+const { pool, query, queryOne, withTransaction, closePool } = await import("../src/config/db.js");
 const { signAccessToken } = await import("../src/lib/tokens.js");
 const { ROLES } = await import("../src/config/constants.js");
 
@@ -138,39 +138,23 @@ async function createRecommendationFixture() {
 
 async function createGroupFixture(fixture) {
   const groupId = randomUUID();
-  await query(
-    `INSERT INTO study_groups
-       (id, slug, name, course_id, description, mode, privacy, require_approval,
-        min_size, max_size, owner_id, created_by_role)
-     VALUES ($1, $2, $3, $4, '', 'EITHER', 'PUBLIC', FALSE, 2, 6, $5, 'STUDENT')`,
-    [groupId, `recs-${RUN}-${groupId.slice(0, 6)}`, `Recommendation Group ${RUN}`, fixture.course.id, fixture.candidate.id],
-    "test:createRecommendationGroup",
-  );
+  await withTransaction(async (tx) => {
+    await tx.query(
+      `INSERT INTO study_groups
+         (id, slug, name, course_id, description, mode, privacy, require_approval,
+          min_size, max_size, owner_id, created_by_role)
+       VALUES ($1, $2, $3, $4, '', 'EITHER', 'PUBLIC', FALSE, 2, 6, $5, 'STUDENT')`,
+      [groupId, `recs-${RUN}-${groupId.slice(0, 6)}`, `Recommendation Group ${RUN}`, fixture.course.id, fixture.candidate.id],
+    );
+
+    await tx.query(
+      `INSERT INTO study_group_members (id, group_id, student_id, role, status, joined_at)
+       VALUES ($1, $2, $3, 'OWNER', 'ACTIVE', now())`,
+      [randomUUID(), groupId, fixture.candidate.id],
+    );
+  }, "test:createRecommendationGroup");
   createdGroupIds.push(groupId);
 
-  await query(
-    `INSERT INTO workspaces (id, group_id, name, description, created_by)
-      VALUES ($1, $2, $3, '', $4)`,
-    [randomUUID(), groupId, `Workspace for ${RUN}`, fixture.candidate.id],
-    "test:createRecommendationWorkspace",
-  );
-  const workspace = await queryOne(
-    "SELECT id FROM workspaces WHERE group_id = $1 ORDER BY created_at DESC LIMIT 1",
-    [groupId],
-    "test:recommendationWorkspace",
-  );
-  await query(
-    "INSERT INTO workspace_groups (workspace_id, group_id, assigned_by) VALUES ($1, $2, $3)",
-    [workspace.id, groupId, fixture.candidate.id],
-    "test:recommendationWorkspaceGroup",
-  );
-
-  await query(
-    `INSERT INTO study_group_members (id, group_id, student_id, role, status, joined_at)
-     VALUES ($1, $2, $3, 'OWNER', 'ACTIVE', now())`,
-    [randomUUID(), groupId, fixture.candidate.id],
-    "test:addRecommendationGroupOwner",
-  );
   await query(
     "INSERT INTO study_group_topics (group_id, topic_id, focus_weight) VALUES ($1, $2, 5)",
     [groupId, fixture.topic.id],
@@ -180,7 +164,7 @@ async function createGroupFixture(fixture) {
 }
 
 describe("recommendation API integration", () => {
-  it("generates and persists an authorized student recommendation", async () => {
+  it("rejects standalone student recommendations", async () => {
     const fixture = await createRecommendationFixture();
     const response = await call("POST", "/api/recommendations", {
       token: fixture.seeker.token,
@@ -193,40 +177,15 @@ describe("recommendation API integration", () => {
       },
     });
 
-    assert.equal(response.status, 200, JSON.stringify(response.body));
-    const result = response.body?.data?.results?.find((entry) => entry.studentId === fixture.candidate.id);
-    assert.ok(result, "the eligible candidate is returned");
-    assert.ok(result.recommendationId, "the tracked result has a persisted recommendation id");
-    assert.ok(result.score >= 40 && result.score <= 100, "the score stays within the public range");
-    assert.ok(Array.isArray(result.explanation) && result.explanation.length > 0, "an explanation is returned");
-
-    const stored = await queryOne(
-      "SELECT target_student_id, rank, shown_at FROM recommendations WHERE id = $1 AND student_id = $2",
-      [result.recommendationId, fixture.seeker.id],
-      "test:recommendationStored",
-    );
-    assert.equal(stored.target_student_id, fixture.candidate.id);
-    assert.equal(stored.rank, result.rank);
-    assert.equal(stored.shown_at, null, "generation does not imply exposure");
-
-    const shown = await call("PATCH", `/api/recommendations/${result.recommendationId}/outcome`, {
-      token: fixture.seeker.token,
-      body: { action: "SHOWN" },
-    });
-    assert.equal(shown.status, 200, JSON.stringify(shown.body));
-    const exposed = await queryOne(
-      "SELECT shown_at FROM recommendations WHERE id = $1",
-      [result.recommendationId],
-      "test:recommendationShown",
-    );
-    assert.ok(exposed.shown_at, "the explicit shown event records exposure");
+    assert.equal(response.status, 400, JSON.stringify(response.body));
   });
 
   it("does not allow a terminal recommendation outcome to be reversed", async () => {
     const fixture = await createRecommendationFixture();
+    await createGroupFixture(fixture);
     const response = await call("POST", "/api/recommendations", {
       token: fixture.seeker.token,
-      body: { kind: "STUDENT", courseId: fixture.course.id, topicIds: [fixture.topic.id], track: true },
+      body: { kind: "GROUP", courseId: fixture.course.id, topicIds: [fixture.topic.id], track: true },
     });
     assert.equal(response.status, 200, JSON.stringify(response.body));
     const recommendationId = response.body?.data?.results?.[0]?.recommendationId;
@@ -264,7 +223,7 @@ describe("recommendation API integration", () => {
     const result = response.body?.data?.results?.find((entry) => entry.groupId === groupId);
     assert.ok(result, "the eligible group is returned");
     assert.equal(result.kind, "GROUP");
-    assert.ok(result.workspaceId, "the group recommendation has a workspace target");
+    assert.equal(result.groupId, groupId);
     assert.ok(result.complementarity > 0, "group complementarity is calculated");
     assert.ok(result.explanation.some((item) => item.type === "SKILL_COMPLEMENTARITY"));
 
@@ -281,10 +240,9 @@ describe("recommendation API integration", () => {
     });
     assert.equal(joined.status, 202, JSON.stringify(joined.body));
     const outcome = await queryOne(
-      `SELECT mo.joined_via, mo.recommendation_id
-         FROM group_membership_outcomes mo
-         JOIN workspace_groups wg ON wg.workspace_id = mo.workspace_id
-        WHERE wg.group_id = $1 AND mo.student_id = $2`,
+      `SELECT joined_via, recommendation_id
+         FROM group_membership_outcomes
+        WHERE group_id = $1 AND student_id = $2`,
       [groupId, fixture.seeker.id],
       "test:groupRecommendationOutcome",
     );

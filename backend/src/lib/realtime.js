@@ -13,7 +13,7 @@ import { ForbiddenError } from "./errors.js";
  * socket, they can also read from the API, and every mutation is validated by a
  * service first. The socket only *pushes* — it never accepts state changes.
  *
- * A SessionWorkspace client connects once, authenticates automatically via the
+ * A GroupSession client connects once, authenticates automatically via the
  * `lien_access` cookie, then subscribes to the room for each session it opens.
  * Subscriptions are re-checked against the database so merely knowing a session
  * id is never enough to receive its activity.
@@ -35,12 +35,34 @@ export function isRealtimeInitialized() {
 }
 
 /** Publish to every participant subscribed to a study session. No-op when idle. */
-export function publishToSession(sessionId, event, payload) {
+export function publishToSession(sessionId, groupId, event, payload = {}) {
   if (!io) return;
-  io.to(roomName(sessionId)).emit(event, { ...payload, sessionId: String(sessionId) });
+  io.to(roomName(groupId, sessionId)).emit(event, {
+    ...payload,
+    sessionId: String(sessionId),
+    groupId: String(groupId),
+  });
 }
 
-const roomName = (sessionId) => `session:${sessionId}`;
+const roomName = (groupId, sessionId) => `group:${groupId}:session:${sessionId}`;
+
+/** Immediately remove a user's live subscriptions after group membership ends. */
+export function revokeGroupAccess(groupId, userId = null) {
+  if (!io) return;
+
+  for (const socket of io.sockets.sockets.values()) {
+    if (userId && String(socket.data.user?.id) !== String(userId)) continue;
+
+    const rooms = socket.data.sessionRooms ?? new Map();
+    for (const [sessionId, sessionGroupId] of rooms) {
+      if (String(sessionGroupId) !== String(groupId)) continue;
+      socket.leave(roomName(sessionGroupId, sessionId));
+      rooms.delete(sessionId);
+    }
+    socket.data.sessionRooms = rooms;
+    socket.emit("group:access-revoked", { groupId: String(groupId) });
+  }
+}
 
 function parseCookies(handshake) {
   const header = handshake?.headers?.cookie;
@@ -93,7 +115,8 @@ export function initRealtime(httpServer) {
     logger.debug("socket connected", { userId: socket.data.user.id, socketId: socket.id });
 
     let checkingSession = false;
-    const joinedSessions = new Set();
+    const joinedSessions = new Map();
+    socket.data.sessionRooms = joinedSessions;
     const sessionTimer = setInterval(async () => {
       if (checkingSession) return;
       checkingSession = true;
@@ -105,15 +128,19 @@ export function initRealtime(httpServer) {
 
         if (joinedSessions.size) {
           const { canParticipateInSession } = await import("../services/studySession.service.js");
-          for (const sessionId of joinedSessions) {
+          for (const [sessionId, groupId] of joinedSessions) {
             try {
-              await canParticipateInSession(sessionId, socket.data.user.id);
+              const access = await canParticipateInSession(sessionId, socket.data.user.id);
+              if (String(access.groupId) !== String(groupId)) {
+                socket.leave(roomName(groupId, sessionId));
+                joinedSessions.delete(sessionId);
+              }
             } catch (error) {
               // Group suspension/archive and membership removal are represented as
               // authorization failures. Leave only the affected room; a database
               // outage should not silently discard every live subscription.
               if ([401, 403, 404].includes(error.status)) {
-                socket.leave(roomName(sessionId));
+                 socket.leave(roomName(groupId, sessionId));
                 joinedSessions.delete(sessionId);
                 continue;
               }
@@ -141,9 +168,9 @@ export function initRealtime(httpServer) {
         // to avoid circular imports at boot.
         const { canParticipateInSession } = await import("../services/studySession.service.js");
         const access = await canParticipateInSession(sessionId, socket.data.user.id);
-        await socket.join(roomName(access.sessionId));
-        joinedSessions.add(access.sessionId);
-        acknowledge?.({ ok: true, sessionId: access.sessionId });
+        await socket.join(roomName(access.groupId, access.sessionId));
+        joinedSessions.set(access.sessionId, access.groupId);
+        acknowledge?.({ ok: true, sessionId: access.sessionId, groupId: access.groupId });
       } catch (error) {
         logger.warn("socket session join denied", {
           userId: socket.data.user.id,
@@ -155,7 +182,8 @@ export function initRealtime(httpServer) {
     });
 
     socket.on("session:leave", ({ sessionId } = {}, acknowledge) => {
-      socket.leave(roomName(sessionId));
+      const groupId = joinedSessions.get(sessionId);
+      if (groupId) socket.leave(roomName(groupId, sessionId));
       joinedSessions.delete(sessionId);
       acknowledge?.({ ok: true });
     });
@@ -166,8 +194,8 @@ export function initRealtime(httpServer) {
     });
   });
 
-  logger.info("Realtime layer initialised", { rooms: "session:*" });
+   logger.info("Realtime layer initialised", { rooms: "group:*:session:*" });
   return io;
 }
 
-export default { initRealtime, getIo, publishToSession, isRealtimeInitialized };
+export default { initRealtime, getIo, publishToSession, revokeGroupAccess, isRealtimeInitialized };

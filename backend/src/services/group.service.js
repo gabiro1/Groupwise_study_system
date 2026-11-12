@@ -8,6 +8,7 @@ import {
 } from "../lib/errors.js";
 import { recordAudit, AUDIT } from "../lib/audit.js";
 import { notify, notifyMany } from "../lib/notifications.js";
+import { revokeGroupAccess } from "../lib/realtime.js";
 import { NOTIFICATION_TYPE, GROUP_MEMBER_ROLE, LEARNING_GOAL_LABELS } from "../config/constants.js";
 
 /**
@@ -59,22 +60,13 @@ export async function loadGroupWithMembership(groupId, userId) {
     `SELECT g.*, c.course_code, c.name AS course_name, c.credit_hours,
             lg.code AS goal_code, lg.label AS goal_label,
             u.first_name AS owner_first_name, u.last_name AS owner_last_name,
-            w.id AS workspace_id,
             EXISTS (SELECT 1 FROM study_group_invitations i
                      WHERE i.group_id = g.id AND i.invitee_id = $2 AND i.status = 'PENDING') AS has_pending_invite
        FROM study_groups g
        JOIN courses c ON c.id = g.course_id
        LEFT JOIN learning_goals lg ON lg.id = g.goal_id
        LEFT JOIN users u ON u.id = g.owner_id
-       LEFT JOIN LATERAL (
-          SELECT w.id
-            FROM workspace_groups wg
-            JOIN workspaces w ON w.id = wg.workspace_id
-           WHERE wg.group_id = g.id AND g.status = 'ACTIVE' AND NOT w.is_archived
-           ORDER BY wg.assigned_at DESC
-           LIMIT 1
-       ) w ON TRUE
-      WHERE g.id = $1`,
+       WHERE g.id = $1`,
     [groupId, userId],
     "groups:load",
   );
@@ -97,7 +89,7 @@ export async function assertMember(groupId, userId) {
   const { group, membership } = await loadGroupWithMembership(groupId, userId);
   // Suspension and archive are access-closure states, not merely labels. Keep
   // the same not-found response for closed groups so an old membership cannot
-  // be used to probe or continue using their workspace.
+  // be used to probe or continue using group content.
   if (group.status !== "ACTIVE") {
     throw new NotFoundError("That study group");
   }
@@ -299,7 +291,6 @@ export async function getGroup(groupId, viewerId) {
     language: group.language,
     activityScore: group.activity_score,
     createdAt: group.created_at,
-    workspaceId: group.workspace_id,
     owner: { firstName: group.owner_first_name, lastName: group.owner_last_name },
     topics,
     schedule,
@@ -315,7 +306,7 @@ export async function getGroup(groupId, viewerId) {
   };
 }
 
-/** Create a group. The workspace is created by a database trigger. */
+/** Create a group without depending on a container side effect. */
 export async function createGroup(ownerId, input) {
   const slug = await uniqueSlug(input.name);
 
@@ -351,9 +342,6 @@ export async function createGroup(ownerId, input) {
       "groups:createOwnerMembership",
     );
 
-    // The workspace is created by a trigger on study_groups, so it already exists
-    // by this point and the owner's outcome row can be opened in the same
-    // transaction as the membership.
     await openMembershipOutcome(tx, created.id, ownerId, "DIRECT");
 
     for (const topic of input.topicIds ?? []) {
@@ -401,7 +389,7 @@ export async function createGroup(ownerId, input) {
 const OWNER_ONLY_FIELDS = new Set(["privacy", "requireApproval", "minSize", "maxSize", "status"]);
 
 export async function updateGroup(groupId, actorId, updates) {
-  const { membership } = await assertMember(groupId, actorId);
+  const { membership } = await assertModerator(groupId, actorId);
   const isOwner = membership.role === GROUP_MEMBER_ROLE.OWNER;
 
   if (!isOwner) {
@@ -565,8 +553,8 @@ export async function inviteMember(groupId, inviterId, inviteeId, { message, ign
 /** Best-effort compatibility estimate for an invite, used for research only. */
 async function scoreInvitee(groupId, inviterId, inviteeId) {
   try {
-    const { pairCompatibility } = await import("./recommendation.service.js");
-    const result = await pairCompatibility(inviterId, inviteeId);
+    const { studentCompatibility } = await import("./recommendation.service.js");
+    const result = await studentCompatibility(inviterId, inviteeId);
     return { score: result.score, note: result.reasons[0]?.detail ?? null };
   } catch {
     // An unavailable scorer must never block an invitation.
@@ -627,14 +615,20 @@ export async function respondToInvitation(userId, invitationId, response) {
     if (accepted) {
       // Rejoining a group you previously left reuses the existing row: the unique
       // constraint is on (group_id, student_id), so an INSERT would collide.
-      await tx.query(
+      const membership = await tx.queryOne(
         `INSERT INTO study_group_members (group_id, student_id, role, status, joined_via)
          VALUES ($1, $2, 'MEMBER', 'ACTIVE', 'INVITATION')
          ON CONFLICT (group_id, student_id)
-         DO UPDATE SET left_at = NULL, status = 'ACTIVE', joined_via = 'INVITATION', joined_at = now()`,
+          DO UPDATE SET role = 'MEMBER', left_at = NULL, status = 'ACTIVE',
+                        joined_via = 'INVITATION', joined_at = now()
+                WHERE study_group_members.left_at IS NOT NULL
+          RETURNING id`,
         [groupId, inviteeId],
         "groups:acceptMembership",
       );
+      if (!membership) {
+        throw new ConflictError("You are already a member of this study group.");
+      }
       await openMembershipOutcome(tx, groupId, inviteeId, "INVITATION");
     }
 
@@ -703,15 +697,21 @@ export async function joinGroup(groupId, studentId, { message, recommendationId 
 
   if (!needsRequest) {
     await withTransaction(async (tx) => {
-      await tx.query(
+      const membership = await tx.queryOne(
         `INSERT INTO study_group_members (group_id, student_id, role, status, joined_via)
          VALUES ($1, $2, 'MEMBER', 'ACTIVE', 'DIRECT')
          ON CONFLICT (group_id, student_id)
-         DO UPDATE SET left_at = NULL, status = 'ACTIVE', joined_via = 'DIRECT', joined_at = now()`,
+          DO UPDATE SET role = 'MEMBER', left_at = NULL, status = 'ACTIVE',
+                        joined_via = 'DIRECT', joined_at = now()
+                WHERE study_group_members.left_at IS NOT NULL
+          RETURNING id`,
         [groupId, studentId],
         "groups:directJoin",
       );
-       await openMembershipOutcome(
+      if (!membership) {
+        throw new ConflictError("You are already a member of this study group.");
+      }
+      await openMembershipOutcome(
          tx,
          groupId,
          studentId,
@@ -726,7 +726,7 @@ export async function joinGroup(groupId, studentId, { message, recommendationId 
       );
     }, "groups:directJoin");
 
-    return { status: "JOINED", groupId, groupSlug: group.slug, workspaceId: await workspaceFor(groupId) };
+    return { status: "JOINED", groupId, groupSlug: group.slug };
   }
 
   // The conflict target must match the partial index exactly, predicate included,
@@ -817,15 +817,21 @@ export async function decideJoinRequest(actorId, requestId, decision, note, opti
     }
 
     if (approve) {
-      await tx.query(
+      const membership = await tx.queryOne(
         `INSERT INTO study_group_members (group_id, student_id, role, status, joined_via)
          VALUES ($1, $2, 'MEMBER', 'ACTIVE', 'JOIN_REQUEST')
          ON CONFLICT (group_id, student_id)
-         DO UPDATE SET left_at = NULL, status = 'ACTIVE', joined_via = 'JOIN_REQUEST', joined_at = now()`,
+          DO UPDATE SET role = 'MEMBER', left_at = NULL, status = 'ACTIVE',
+                        joined_via = 'JOIN_REQUEST', joined_at = now()
+                WHERE study_group_members.left_at IS NOT NULL
+          RETURNING id`,
         [request.group_id, request.student_id],
         "groups:approveMembership",
       );
-       await openMembershipOutcome(
+      if (!membership) {
+        throw new ConflictError("That student is already a member of this study group.");
+      }
+      await openMembershipOutcome(
          tx,
          request.group_id,
          request.student_id,
@@ -944,11 +950,14 @@ export async function manageMember(groupId, actorId, targetStudentId, action) {
   );
 
   if (action === "REMOVE") {
+    revokeGroupAccess(groupId, targetStudentId);
     await notify({
       userId: targetStudentId,
       type: NOTIFICATION_TYPE.SYSTEM,
       title: "You were removed from a study group",
       body: "A moderator removed you from the group. You can rejoin if it is still open.",
+      link: `/groups/${groupId}`,
+      metadata: { groupId },
     });
   }
 
@@ -965,18 +974,9 @@ export async function leaveGroup(groupId, studentId, reason) {
   const { group, membership } = await assertMember(groupId, studentId);
 
   if (membership.role === GROUP_MEMBER_ROLE.OWNER) {
-    const others = await queryOne(
-      `SELECT count(*)::int AS count FROM study_group_members
-        WHERE group_id = $1 AND student_id <> $2 AND left_at IS NULL AND status = 'ACTIVE'`,
-      [groupId, studentId],
-      "groups:leaveOthers",
+    throw new ConflictError(
+      "Transfer ownership or archive the group before leaving as its owner.",
     );
-
-    if (others.count === 0) {
-      throw new ConflictError(
-        "You are the only member. Archive the group or invite someone before leaving.",
-      );
-    }
   }
 
   await withTransaction(async (tx) => {
@@ -994,6 +994,7 @@ export async function leaveGroup(groupId, studentId, reason) {
     );
   }, "groups:leave");
 
+  revokeGroupAccess(groupId, studentId);
   return { left: true, groupId, groupName: group.name };
 }
 
@@ -1016,14 +1017,14 @@ export async function transferOwnership(groupId, actorId, newOwnerId) {
 
   await withTransaction(async (tx) => {
     await tx.query(
-      "UPDATE study_group_members SET role = 'OWNER' WHERE id = $1",
-      [target.id],
-      "groups:promoteOwner",
-    );
-    await tx.query(
       "UPDATE study_group_members SET role = 'MEMBER' WHERE group_id = $1 AND student_id = $2",
       [groupId, actorId],
       "groups:demoteSelf",
+    );
+    await tx.query(
+      "UPDATE study_group_members SET role = 'OWNER' WHERE id = $1",
+      [target.id],
+      "groups:promoteOwner",
     );
     await tx.query("UPDATE study_groups SET owner_id = $2 WHERE id = $1", [groupId, newOwnerId], "groups:setOwner");
   }, "groups:transferOwnership");
@@ -1050,14 +1051,6 @@ export async function archiveGroup(groupId, actorId) {
     );
     if (!archived) throw new ConflictError("That group changed state and cannot be archived.");
     await tx.query(
-      `UPDATE workspaces
-          SET is_archived = TRUE, archived_at = now()
-        WHERE id IN (SELECT workspace_id FROM workspace_groups WHERE group_id = $1)
-          AND NOT is_archived`,
-      [groupId],
-      "groups:archiveWorkspace",
-    );
-    await tx.query(
       "UPDATE study_group_invitations SET status = 'CANCELLED' WHERE group_id = $1 AND status = 'PENDING'",
       [groupId],
       "groups:cancelInvites",
@@ -1079,6 +1072,7 @@ export async function archiveGroup(groupId, actorId) {
     );
   }, "groups:archive");
 
+  revokeGroupAccess(groupId);
   return { archived: true, groupId };
 }
 
@@ -1098,21 +1092,13 @@ export async function listMyGroups(userId, { includeArchived = false } = {}) {
                 g.member_count, g.min_size, g.max_size, g.created_at,
                 g.updated_at AS last_active_at,
                 m.role AS my_role, m.joined_at,
-                c.id AS course_id, c.course_code, c.name AS course_name,
-                w.id AS workspace_id,
-                (SELECT max(created_at) FROM messages msg WHERE msg.workspace_id = w.id AND msg.deleted_at IS NULL) AS last_message_at,
-                (SELECT count(*)::int FROM group_activity_events e WHERE e.group_id = g.id AND e.created_at > now() - interval '7 days') AS events_this_week
-           FROM study_group_members m
-           JOIN study_groups g ON g.id = m.group_id
-           JOIN courses c ON c.id = g.course_id
-           LEFT JOIN LATERAL (
-             SELECT w.id FROM workspace_groups wg
-             JOIN workspaces w ON w.id = wg.workspace_id
-              WHERE wg.group_id = g.id AND NOT w.is_archived
-              ORDER BY wg.assigned_at DESC
-              LIMIT 1
-           ) w ON TRUE
-          WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
+                 c.id AS course_id, c.course_code, c.name AS course_name,
+                 (SELECT max(created_at) FROM messages msg WHERE msg.group_id = g.id AND msg.deleted_at IS NULL) AS last_message_at,
+                 (SELECT count(*)::int FROM group_activity_events e WHERE e.group_id = g.id AND e.created_at > now() - interval '7 days') AS events_this_week
+            FROM study_group_members m
+            JOIN study_groups g ON g.id = m.group_id
+            JOIN courses c ON c.id = g.course_id
+           WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
             AND ($2::boolean OR g.status = 'ACTIVE')
        ) filtered
       ORDER BY
@@ -1194,21 +1180,6 @@ export async function listModerationQueue(groupId, actorId) {
   return { invitations, requests };
 }
 
-async function workspaceFor(groupId) {
-  const row = await queryOne(
-     `SELECT w.id
-        FROM workspaces w
-        LEFT JOIN workspace_groups wg ON wg.workspace_id = w.id AND wg.group_id = $1
-       WHERE NOT w.is_archived
-         AND (w.group_id = $1 OR wg.group_id = $1)
-       ORDER BY wg.assigned_at DESC NULLS LAST, w.created_at DESC
-      LIMIT 1`,
-    [groupId],
-    "groups:workspaceFor",
-  );
-  return row?.id ?? null;
-}
-
 /** Validate that an attributed recommendation belongs to this student and group. */
 async function validateGroupRecommendation(recommendationId, groupId, studentId) {
   const row = await queryOne(
@@ -1216,18 +1187,8 @@ async function validateGroupRecommendation(recommendationId, groupId, studentId)
        FROM recommendations r
       WHERE r.id = $1
         AND r.student_id = $2
-        AND r.kind = 'GROUP'
-        AND (
-          r.target_group_id = $3
-          OR EXISTS (
-            SELECT 1 FROM workspaces w
-             WHERE w.id = r.target_workspace_id
-               AND (w.group_id = $3 OR EXISTS (
-                 SELECT 1 FROM workspace_groups wg
-                  WHERE wg.workspace_id = w.id AND wg.group_id = $3
-               ))
-          )
-        )`,
+         AND r.kind = 'GROUP'
+         AND r.target_group_id = $3`,
     [recommendationId, studentId, groupId],
     "groups:validateRecommendationAttribution",
   );
@@ -1239,7 +1200,7 @@ async function validateGroupRecommendation(recommendationId, groupId, studentId)
  * Open a research-outcome row for a new membership.
  *
  * `group_membership_outcomes` is the spine of the study: one row per student per
- * workspace, recording how they arrived and what they did afterwards. The
+ * group, recording how they arrived and what they did afterwards. The
  * compatibility score that produced the match is measured *before* joining and the
  * activity counters are measured *after*, so the two are never entangled.
  *
@@ -1252,39 +1213,42 @@ async function validateGroupRecommendation(recommendationId, groupId, studentId)
  * make the analysis circular.
  */
 async function openMembershipOutcome(tx, groupId, studentId, joinedVia, recommendationId = null) {
-  const workspace = await tx.query(
-     `SELECT w.id
-        FROM workspaces w
-        LEFT JOIN workspace_groups wg ON wg.workspace_id = w.id AND wg.group_id = $1
-       WHERE NOT w.is_archived
-         AND (w.group_id = $1 OR wg.group_id = $1)
-       ORDER BY wg.assigned_at DESC NULLS LAST, w.created_at DESC
-      LIMIT 1`,
-    [groupId],
-    "groups:outcomeWorkspace",
-  );
-
-  const workspaceId = workspace.rows[0]?.id;
-  if (!workspaceId) return null;
-
   // Re-joining after leaving reuses the same membership row (the unique constraint
   // is on group + student), so the previous outcome row is replaced rather than
   // duplicated: a student who leaves and rejoins is one episode for this study.
-  await tx.query(
-    `INSERT INTO group_membership_outcomes
-       (workspace_id, student_id, joined_via, recommendation_id, joined_at, left_at, leave_reason)
-     VALUES ($1, $2, $3, $4, now(), NULL, NULL)
-     ON CONFLICT (workspace_id, student_id) DO UPDATE
-       SET joined_via = EXCLUDED.joined_via,
-           recommendation_id = EXCLUDED.recommendation_id,
-           joined_at = now(),
-           left_at = NULL,
-           leave_reason = NULL`,
-    [workspaceId, studentId, joinedVia, recommendationId],
-    "groups:openOutcome",
+  await tx.queryOne(
+    "SELECT id FROM study_groups WHERE id = $1 FOR UPDATE",
+    [groupId],
+    "groups:lockOutcomeGroup",
+  );
+  const existing = await tx.queryOne(
+    `SELECT id FROM group_membership_outcomes
+      WHERE group_id = $1 AND student_id = $2
+      ORDER BY joined_at DESC LIMIT 1 FOR UPDATE`,
+    [groupId, studentId],
+    "groups:existingOutcome",
   );
 
-  return workspaceId;
+  if (existing) {
+    await tx.query(
+      `UPDATE group_membership_outcomes
+          SET joined_via = $2, recommendation_id = $3, joined_at = now(),
+              left_at = NULL, leave_reason = NULL
+        WHERE id = $1`,
+      [existing.id, joinedVia, recommendationId],
+      "groups:reopenOutcome",
+    );
+  } else {
+    await tx.query(
+      `INSERT INTO group_membership_outcomes
+         (group_id, student_id, joined_via, recommendation_id, joined_at, left_at, leave_reason)
+       VALUES ($1, $2, $3, $4, now(), NULL, NULL)`,
+      [groupId, studentId, joinedVia, recommendationId],
+      "groups:openOutcome",
+    );
+  }
+
+  return groupId;
 }
 
 /**
@@ -1298,11 +1262,7 @@ async function closeMembershipOutcome(tx, groupId, studentId, reason) {
     `UPDATE group_membership_outcomes o
         SET left_at = now(),
             leave_reason = $3
-       FROM workspaces w
-      WHERE o.workspace_id = w.id
-         AND (w.group_id = $1 OR EXISTS (
-           SELECT 1 FROM workspace_groups wg WHERE wg.workspace_id = w.id AND wg.group_id = $1
-         ))
+      WHERE o.group_id = $1
         AND o.student_id = $2
         AND o.left_at IS NULL`,
     [groupId, studentId, reason],
@@ -1322,32 +1282,22 @@ async function closeMembershipOutcome(tx, groupId, studentId, reason) {
 export async function leaderOverview(userId) {
   const groups = await queryRows(
     `SELECT g.id, g.slug, g.name, g.privacy, g.status, g.member_count, g.min_size, g.max_size,
-            g.created_at, m.role AS my_role, m.joined_at AS role_since,
-            c.course_code, c.name AS course_name,
-            w.id AS workspace_id,
-            (SELECT count(*)::int FROM study_group_join_requests jr
+             g.created_at, m.role AS my_role, m.joined_at AS role_since,
+             c.course_code, c.name AS course_name,
+             (SELECT count(*)::int FROM study_group_join_requests jr
               WHERE jr.group_id = g.id AND jr.status = 'PENDING') AS pending_requests,
-            (SELECT count(*)::int FROM study_group_invitations i
-              WHERE i.group_id = g.id AND i.status = 'PENDING' AND i.expires_at > now()) AS pending_invitations,
-            (SELECT count(*)::int FROM study_sessions ss
-              JOIN workspaces wsp ON wsp.id = ss.workspace_id
-              WHERE NOT wsp.is_archived
-                AND EXISTS (SELECT 1 FROM workspace_groups wg2 WHERE wg2.workspace_id = wsp.id AND wg2.group_id = g.id)
-                AND ss.status = 'SCHEDULED' AND ss.starts_at > now()) AS upcoming_sessions,
+             (SELECT count(*)::int FROM study_group_invitations i
+               WHERE i.group_id = g.id AND i.status = 'PENDING' AND i.expires_at > now()) AS pending_invitations,
+             (SELECT count(*)::int FROM study_sessions ss
+               WHERE ss.group_id = g.id
+                 AND ss.status = 'SCHEDULED' AND ss.starts_at > now()) AS upcoming_sessions,
             (SELECT count(*)::int FROM study_group_members m2
               WHERE m2.group_id = g.id AND m2.left_at IS NULL) AS active_members,
             (SELECT max(created_at) FROM group_activity_events e WHERE e.group_id = g.id) AS last_activity_at
-       FROM study_group_members m
-       JOIN study_groups g ON g.id = m.group_id
-       JOIN courses c ON c.id = g.course_id
-       LEFT JOIN LATERAL (
-         SELECT w.id FROM workspace_groups wg
-         JOIN workspaces w ON w.id = wg.workspace_id
-          WHERE wg.group_id = g.id AND NOT w.is_archived
-          ORDER BY wg.assigned_at DESC
-          LIMIT 1
-       ) w ON TRUE
-       WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
+        FROM study_group_members m
+        JOIN study_groups g ON g.id = m.group_id
+        JOIN courses c ON c.id = g.course_id
+        WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
         AND m.role IN ('OWNER', 'MODERATOR')
         AND g.status = 'ACTIVE'
       ORDER BY m.role = 'OWNER' DESC, g.member_count DESC`,

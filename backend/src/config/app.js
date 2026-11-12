@@ -15,8 +15,6 @@ import authRoutes from "../routes/auth.routes.js";
 import academicRoutes from "../routes/academic.routes.js";
 import studentsRoutes from "../routes/students.routes.js";
 import studyGroupsRoutes from "../routes/studyGroups.routes.js";
-import partnersRoutes from "../routes/partners.routes.js";
-import workspacesRoutes from "../routes/workspaces.routes.js";
 import sessionsRoutes from "../routes/sessions.routes.js";
 import meetingsRoutes from "../routes/meetings.routes.js";
 import recommendationsRoutes from "../routes/recommendations.routes.js";
@@ -160,8 +158,6 @@ export function createApp() {
   app.use("/api/academic", academicRoutes);
   app.use("/api/students", studentsRoutes);
   app.use("/api/study-groups", studyGroupsRoutes);
-  app.use("/api/partners", partnersRoutes);
-  app.use("/api/workspaces", workspacesRoutes);
   app.use("/api/sessions", sessionsRoutes);
   app.use("/api/meetings", meetingsRoutes);
   app.use("/api/recommendations", recommendationsRoutes);
@@ -172,7 +168,7 @@ export function createApp() {
   // which intentionally keep their original list/moderation endpoints.
   app.use("/api/admin", adminConsoleRoutes);
   app.use("/api/admin", adminRecommendationRoutes);
-  // The management surface (group leaders, workspaces, sessions, analytics, AI
+  // The management surface (group leaders, sessions, analytics, AI
   // config, announcements) is mounted first so its specific paths resolve before
   // the older admin router's catch-alls.
   app.use("/api/admin", adminManagementRoutes);

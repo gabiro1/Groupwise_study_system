@@ -10,6 +10,7 @@ import { AppError, ConflictError, ForbiddenError, NotFoundError } from "../lib/e
 import { recordAudit, AUDIT, sanitiseMetadata } from "../lib/audit.js";
 import { notifyMany } from "../lib/notifications.js";
 import { NOTIFICATION_TYPE } from "../config/constants.js";
+import { revokeGroupAccess } from "../lib/realtime.js";
 import {
   userIdParamSchema,
   adminUpdateUserSchema,
@@ -93,11 +94,12 @@ router.get(
     const { userId } = req.params;
 
     const user = await queryOne(
-      `SELECT u.id, u.email, u.first_name, u.last_name, u.avatar_url, u.status, r.key AS role,
+        `SELECT u.id, u.email, u.staff_identifier, u.first_name, u.last_name, u.avatar_url, u.status, r.key AS role,
               u.email_verified_at, u.failed_login_count, u.locked_until, u.last_login_at,
               u.password_changed_at, u.must_change_password, u.suspended_at, u.suspension_reason,
               u.created_at, u.updated_at,
-              sp.university_id, sp.program_id, sp.year_of_study, sp.student_number,
+               sp.university_id, sp.program_id, sp.year_of_study, sp.current_semester, sp.admission_year, sp.student_number,
+               sp.registration_number_verified_at,
               sp.onboarding_step, sp.onboarding_done, sp.last_active_at,
               un.name AS university_name, p.name AS program_name
          FROM users u
@@ -206,7 +208,12 @@ router.patch(
 
     let emailChanged = false;
     let previousEmail = null;
-    const userColumns = { firstName: "first_name", lastName: "last_name", email: "email" };
+    const userColumns = {
+      firstName: "first_name",
+      lastName: "last_name",
+      email: "email",
+      staffIdentifier: "staff_identifier",
+    };
     // Keep the target id in the parameter list while building assignments. This
     // prevents the SET placeholders from drifting when fields are optional.
     const userValues = [userId];
@@ -216,7 +223,13 @@ router.patch(
       userValues.push(body[key]);
       userAssignments.push(`${column} = $${userValues.length}`);
     }
-    const profileColumns = { yearOfStudy: "year_of_study", programId: "program_id" };
+    const profileColumns = {
+      yearOfStudy: "year_of_study",
+      currentSemester: "current_semester",
+      admissionYear: "admission_year",
+      programId: "program_id",
+      registrationNumber: "student_number",
+    };
     const profileValues = [userId];
     const profileAssignments = [];
     for (const [key, column] of Object.entries(profileColumns)) {
@@ -227,14 +240,60 @@ router.patch(
 
     const updated = await withTransaction(async (tx) => {
       const target = await tx.queryOne(
-        `SELECT u.id, u.email
+        `SELECT u.id, u.email, u.staff_identifier, r.key AS role
            FROM users u
+           JOIN roles r ON r.id = u.role_id
           WHERE u.id = $1 AND u.deleted_at IS NULL
           FOR UPDATE`,
         [userId],
         "console:loadUserForUpdate",
       );
       if (!target) throw new NotFoundError("That user");
+
+      const registrationChange = body.registrationNumber !== undefined
+        || body.registrationNumberVerified !== undefined;
+      if (registrationChange && target.role !== "STUDENT") {
+        throw new ForbiddenError("Registration numbers can only be assigned to student accounts.");
+      }
+      if (body.staffIdentifier !== undefined && target.role === "STUDENT") {
+        throw new ForbiddenError("Staff identifiers are reserved for staff accounts.");
+      }
+      if (body.registrationNumberVerified === true && body.registrationNumber === null) {
+        throw new AppError("A registration number is required before it can be verified.", {
+          status: 422,
+          code: "REGISTRATION_NUMBER_REQUIRED",
+          fields: { registrationNumber: "Assign a registration number first." },
+        });
+      }
+
+      if (body.registrationNumber) {
+        const duplicate = await tx.queryOne(
+          `SELECT user_id FROM student_profiles
+            WHERE regexp_replace(upper(student_number::text), '\\s+', '', 'g') = $1
+              AND user_id <> $2`,
+          [body.registrationNumber, userId],
+          "console:registrationNumberConflict",
+        );
+        if (duplicate) {
+          throw new ConflictError("That registration number is already assigned to another student.", {
+            code: "REGISTRATION_NUMBER_TAKEN",
+            fields: { registrationNumber: "Choose a unique registration number." },
+          });
+        }
+      }
+      if (body.staffIdentifier) {
+        const duplicate = await tx.queryOne(
+          `SELECT id FROM users
+            WHERE regexp_replace(upper(staff_identifier::text), '\\s+', '', 'g') = $1
+              AND id <> $2 AND deleted_at IS NULL`,
+          [body.staffIdentifier, userId],
+          "console:staffIdentifierConflict",
+        );
+        if (duplicate) throw new ConflictError("That staff identifier is already assigned to another account.", {
+          code: "STAFF_IDENTIFIER_TAKEN",
+          fields: { staffIdentifier: "Choose a unique staff identifier." },
+        });
+      }
 
       emailChanged = body.email !== undefined && body.email.toLowerCase() !== String(target.email).toLowerCase();
       previousEmail = target.email;
@@ -279,19 +338,72 @@ router.patch(
         );
       }
 
-      if (profileAssignments.length) {
+      if (profileAssignments.length || registrationChange) {
         // A profile row is created on registration, but an admin may edit a
         // legacy account that predates the onboarding flow.
         const exists = await tx.queryOne("SELECT user_id FROM student_profiles WHERE user_id = $1", [userId]);
         if (exists) {
+          if (body.registrationNumber !== undefined) {
+            profileAssignments.push(
+              body.registrationNumber === null
+                ? "registration_number_verified_at = NULL"
+                : body.registrationNumberVerified === true
+                  ? "registration_number_verified_at = now()"
+                  : "registration_number_verified_at = NULL",
+            );
+            profileAssignments.push(
+              body.registrationNumber && body.registrationNumberVerified === true
+                ? `registration_number_verified_by = $${profileValues.push(req.user.id)}`
+                : "registration_number_verified_by = NULL",
+            );
+          } else if (body.registrationNumberVerified !== undefined) {
+            profileAssignments.push(
+              body.registrationNumberVerified ? "registration_number_verified_at = now()" : "registration_number_verified_at = NULL",
+            );
+            profileAssignments.push(
+              body.registrationNumberVerified
+                ? `registration_number_verified_by = $${profileValues.push(req.user.id)}`
+                : "registration_number_verified_by = NULL",
+            );
+          }
           await tx.query(
             `UPDATE student_profiles SET ${profileAssignments.join(", ")}, updated_at = now()
               WHERE user_id = $1`,
             profileValues,
             "console:updateProfile",
           );
+        } else if (body.registrationNumber !== undefined || body.admissionYear !== undefined) {
+          if (body.programId !== undefined || body.yearOfStudy !== undefined) {
+            throw new AppError("Complete the academic profile before changing its programme or year.", {
+              status: 422,
+              code: "PROFILE_MISSING",
+            });
+          }
+          const columns = ["user_id"];
+          const values = [userId];
+          const placeholders = ["$1"];
+          const add = (column, value) => {
+            columns.push(column);
+            values.push(value);
+            placeholders.push(`$${values.length}`);
+          };
+          if (body.registrationNumber !== undefined) add("student_number", body.registrationNumber);
+          if (body.admissionYear !== undefined) add("admission_year", body.admissionYear);
+          if (body.registrationNumber !== undefined || body.registrationNumberVerified !== undefined) {
+            if (body.registrationNumberVerified === true) {
+              add("registration_number_verified_at", new Date());
+              add("registration_number_verified_by", req.user.id);
+            } else {
+              add("registration_number_verified_at", null);
+              add("registration_number_verified_by", null);
+            }
+          }
+          await tx.query(
+            `INSERT INTO student_profiles (${columns.join(", ")}) VALUES (${placeholders.join(", ")})`,
+            values,
+            "console:createLegacyProfile",
+          );
         } else {
-          // university_id is NOT NULL, so a profile cannot be conjured without it.
           throw new AppError("This account has no academic profile yet. Ask the student to complete onboarding.", {
             status: 422,
             code: "PROFILE_MISSING",
@@ -315,6 +427,23 @@ router.patch(
         },
         { tx },
       );
+
+      if (registrationChange) {
+        await recordAudit(
+          {
+            actor: actor(req),
+            req,
+            action: AUDIT.STUDENT_REGISTRATION_NUMBER_UPDATED,
+            entityType: "user",
+            entityId: userId,
+            metadata: {
+              assigned: Boolean(body.registrationNumber),
+              verified: body.registrationNumberVerified === true,
+            },
+          },
+          { tx },
+        );
+      }
 
       return { user, emailChanged, sessionsRevoked };
     }, "console:updateUser");
@@ -365,8 +494,7 @@ router.delete(
 
       // An account cannot be removed while its groups still point at it as
       // owner. Archive those groups first so the admin action remains atomic,
-      // preserves their academic history, and does not leave orphaned active
-      // workspaces or pending requests behind.
+        // preserves their academic history and does not leave pending requests behind.
       for (const group of ownedGroups) {
         await tx.query(
           `UPDATE study_groups
@@ -374,13 +502,6 @@ router.delete(
             WHERE id = $1 AND status IN ('ACTIVE', 'SUSPENDED')`,
           [group.id],
           "console:archiveOwnedGroupForDelete",
-        );
-        await tx.query(
-          `UPDATE workspaces SET is_archived = TRUE, archived_at = now()
-            WHERE id IN (SELECT workspace_id FROM workspace_groups WHERE group_id = $1)
-              AND NOT is_archived`,
-          [group.id],
-          "console:archiveOwnedGroupWorkspacesForDelete",
         );
         await tx.query(
           "UPDATE study_group_invitations SET status = 'CANCELLED' WHERE group_id = $1 AND status = 'PENDING'",
@@ -482,12 +603,12 @@ router.delete(
 /**
  * POST /api/admin/users/:userId/role
  *
- * Existing role-change route only grants STUDENT/GROUP_LEADER. This one keeps
- * administrator promotion out of the normal console, with guard rails that
+ * This route only demotes to STUDENT. Administrator promotion stays out of the
+ * normal console, with guard rails that
  * cannot be bypassed by the client:
  *   - an admin cannot change their own role;
  *   - the last remaining administrator cannot be demoted;
- *   - demoting a leader who still leads an active group is refused.
+ *   - group leadership remains intact because it is membership-scoped.
  */
 router.post(
   "/users/:userId/role",
@@ -543,23 +664,6 @@ router.post(
       }
       if (target.role === "ADMIN" && role !== "STUDENT") {
         throw new ForbiddenError("An administrator can only be demoted to a student account.");
-      }
-
-      if (["GROUP_LEADER", "ADMIN"].includes(target.role) && role === "STUDENT") {
-        const leading = await tx.queryOne(
-          `SELECT count(*)::int AS groups
-             FROM study_group_members m JOIN study_groups g ON g.id = m.group_id
-            WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
-              AND m.role IN ('OWNER', 'MODERATOR') AND g.status = 'ACTIVE'`,
-          [userId],
-          "console:leaderGroups",
-        );
-        if ((leading?.groups ?? 0) > 0) {
-          throw new ConflictError("That user still leads active groups. Remove them as a leader first.", {
-            code: "STILL_LEADING",
-            details: { groups: leading.groups },
-          });
-        }
       }
 
       const user = await tx.queryOne(
@@ -799,10 +903,9 @@ router.get(
               owner.first_name AS owner_first_name, owner.last_name AS owner_last_name, owner.id AS owner_id,
               (SELECT count(*)::int FROM study_group_join_requests jr
                 WHERE jr.group_id = g.id AND jr.status = 'PENDING') AS pending_requests,
-              (SELECT count(*)::int FROM session_participants sp
-                 JOIN study_sessions s ON s.id = sp.session_id
-                 JOIN workspaces w ON w.id = s.workspace_id
-                WHERE w.group_id = g.id) AS participations
+               (SELECT count(*)::int FROM session_participants sp
+                  JOIN study_sessions s ON s.id = sp.session_id
+                 WHERE s.group_id = g.id) AS participations
          FROM study_groups g
          JOIN courses c ON c.id = g.course_id
          JOIN users owner ON owner.id = g.owner_id
@@ -874,8 +977,7 @@ router.get(
                 (SELECT count(*)::int FROM session_participants p WHERE p.session_id = s.id) AS participants,
                 (SELECT count(*)::int FROM session_participants p WHERE p.session_id = s.id AND p.attended) AS attended
            FROM study_sessions s
-           JOIN workspaces w ON w.id = s.workspace_id
-          WHERE w.group_id = $1
+          WHERE s.group_id = $1
           ORDER BY s.starts_at DESC
           LIMIT 10`,
         [groupId],
@@ -893,9 +995,11 @@ router.get(
       queryOne(
         `SELECT
            (SELECT count(*)::int FROM study_group_members WHERE group_id = $1 AND left_at IS NULL) AS members,
-           (SELECT count(*)::int FROM workspaces WHERE group_id = $1 AND NOT is_archived) AS workspaces,
-           (SELECT count(*)::int FROM study_sessions s JOIN workspaces w ON w.id = s.workspace_id
-             WHERE w.group_id = $1) AS sessions,
+           (SELECT count(*)::int FROM study_plans WHERE group_id = $1) AS plans,
+           (SELECT count(*)::int FROM tasks WHERE group_id = $1) AS tasks,
+           (SELECT count(*)::int FROM resources WHERE group_id = $1 AND NOT is_deleted) AS resources,
+           (SELECT count(*)::int FROM messages WHERE group_id = $1 AND deleted_at IS NULL) AS messages,
+           (SELECT count(*)::int FROM study_sessions s WHERE s.group_id = $1) AS sessions,
            (SELECT count(*)::int FROM group_meetings WHERE group_id = $1) AS meetings`,
         [groupId],
         "console:groupCounts",
@@ -1098,14 +1202,7 @@ router.post(
       );
       if (!archived) throw new ConflictError("That group changed state and cannot be archived.");
 
-      await tx.query(
-        `UPDATE workspaces SET is_archived = TRUE, archived_at = now()
-          WHERE id IN (SELECT workspace_id FROM workspace_groups WHERE group_id = $1)
-            AND NOT is_archived`,
-        [groupId],
-        "console:archiveGroupWorkspaces",
-      );
-      await tx.query(
+       await tx.query(
         "UPDATE study_group_invitations SET status = 'CANCELLED' WHERE group_id = $1 AND status = 'PENDING'",
         [groupId],
         "console:cancelGroupInvitations",
@@ -1131,6 +1228,7 @@ router.post(
       return archived;
     }, "console:archiveGroup");
 
+    revokeGroupAccess(groupId);
     return ok(res, { group: updated });
   }),
 );
@@ -1181,6 +1279,7 @@ router.delete(
       );
     }, "console:removeMember");
 
+    revokeGroupAccess(groupId, userId);
     return ok(res, { removed: true });
   }),
 );
@@ -1200,15 +1299,13 @@ router.get(
     const session = await queryOne(
       `SELECT s.id, s.title, s.status, s.mode, s.format, s.location, s.meeting_url, s.agenda,
               s.main_topic, s.objectives, s.starts_at, s.ends_at, s.created_at, s.updated_at,
-              s.started_at, s.completed_at, s.cancelled_by, s.cancellation_reason,
-              w.id AS workspace_id, w.name AS workspace_name,
-              g.id AS group_id, g.name AS group_name, g.status AS group_status,
+               s.started_at, s.completed_at, s.cancelled_by, s.cancellation_reason,
+               g.id AS group_id, g.name AS group_name, g.status AS group_status,
               c.course_code, c.name AS course_name,
               host.id AS host_id, host.first_name AS host_first_name, host.last_name AS host_last_name,
               canceller.first_name AS cancelled_by_first_name, canceller.last_name AS cancelled_by_last_name
-         FROM study_sessions s
-         JOIN workspaces w ON w.id = s.workspace_id
-         JOIN study_groups g ON g.id = w.group_id
+          FROM study_sessions s
+          JOIN study_groups g ON g.id = s.group_id
          LEFT JOIN courses c ON c.id = g.course_id
          LEFT JOIN users host ON host.id = s.created_by
          LEFT JOIN users canceller ON canceller.id = s.cancelled_by
@@ -1259,10 +1356,9 @@ router.post(
     const { reason } = req.body;
 
     const session = await queryOne(
-      `SELECT s.id, s.title, s.status, s.starts_at, w.group_id, g.name AS group_name
+      `SELECT s.id, s.title, s.status, s.starts_at, s.group_id, g.name AS group_name
          FROM study_sessions s
-         JOIN workspaces w ON w.id = s.workspace_id
-         JOIN study_groups g ON g.id = w.group_id
+         JOIN study_groups g ON g.id = s.group_id
         WHERE s.id = $1`,
       [sessionId],
       "console:loadSessionForCancel",
@@ -1346,22 +1442,14 @@ async function loadReportTarget(report) {
         // Message bodies are intentionally absent from admin detail. The report
         // category/details and safe target metadata are enough to act without
         // turning moderation into a private-message reading surface.
-        const workspaceMessage = await queryOne(
-          `SELECT m.id, m.created_at, m.deleted_at, m.kind, 'WORKSPACE' AS source,
-                  u.first_name AS author_first_name, u.last_name AS author_last_name
-             FROM messages m LEFT JOIN users u ON u.id = m.author_id WHERE m.id = $1`,
+        const groupMessage = await queryOne(
+          `SELECT m.id, m.created_at, m.deleted_at, m.kind, 'GROUP' AS source,
+                   u.first_name AS author_first_name, u.last_name AS author_last_name
+              FROM messages m LEFT JOIN users u ON u.id = m.author_id WHERE m.id = $1`,
           [report.target_id],
           "console:reportMessage",
         );
-        if (workspaceMessage) return workspaceMessage;
-
-        return queryOne(
-          `SELECT dm.id, dm.created_at, dm.deleted_at, 'DIRECT' AS source,
-                  u.first_name AS author_first_name, u.last_name AS author_last_name
-             FROM direct_messages dm LEFT JOIN users u ON u.id = dm.sender_id WHERE dm.id = $1`,
-          [report.target_id],
-          "console:reportDirectMessage",
-        );
+        return groupMessage;
       }
     case "RESOURCE":
       return queryOne(

@@ -121,7 +121,6 @@ function LeaderIcon({ name, size = 18, strokeWidth = 1.8 }) {
     folder: <path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
     chat: <path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2Z" />,
     video: <><rect x="3" y="6" width="13" height="12" rx="2" /><path d="m22 8-6 4 6 4V8Z" /></>,
-    partner: <><path d="M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="10" cy="7" r="4" /><path d="M20 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8" /></>,
     bell: <><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.7 21a2 2 0 0 1-3.4 0" /></>,
     plus: <><path d="M12 5v14M5 12h14" /></>,
   };
@@ -169,7 +168,7 @@ export default function LeaderDashboard({ initialSection = "overview", initialGr
       }
 
       if (!active) return;
-      if (!["STUDENT", "GROUP_LEADER"].includes(auth.user?.role)) {
+      if (auth.user?.role !== "STUDENT") {
         if (auth.user?.role === "ADMIN") {
           window.location.replace("/admin");
           return;
@@ -584,7 +583,7 @@ function GroupsSection({ groups, activeGroup, navigate }) {
           <div><span className="section-overline">GROUP MANAGEMENT</span><h2>Groups you lead <span className="heading-count">{groups.length}</span></h2></div>
         </div>
         <p className="leader-muted">
-          Everything you manage lives here. Open a group&apos;s members, requests or sessions, or jump into its workspace.
+          Everything you manage lives here. Open a group&apos;s members, requests, sessions, resources, or settings.
         </p>
         <div className="leader-group-cards">
           {groups.map((group) => (
@@ -610,9 +609,7 @@ function GroupsSection({ groups, activeGroup, navigate }) {
                 <button type="button" className="button button-secondary" onClick={() => navigate("matching", group.id)}>Matching</button>
                 <button type="button" className="button button-secondary" onClick={() => navigate("analytics", group.id)}>Analytics</button>
                 <button type="button" className="button button-secondary" onClick={() => navigate("settings", group.id)}>Settings</button>
-                {group.workspace_id && (
-                  <Link className="button button-primary" href={`/dashboard/workspaces/${group.workspace_id}`}>Open workspace</Link>
-                )}
+                <Link className="button button-primary" href={`/dashboard/groups/${group.id}`}>Open group</Link>
               </div>
               <p className="leader-muted leader-tiny">Last activity {formatDate(group.last_activity_at)}</p>
             </article>
@@ -626,7 +623,7 @@ function GroupsSection({ groups, activeGroup, navigate }) {
 function ResourcesSection({ groups, refreshKey }) {
   const [state, setState] = useState({ loading: true, error: "", byGroup: [] });
   const [nonce, setNonce] = useState(0);
-  const managed = useMemo(() => groups.filter((group) => group.workspace_id), [groups]);
+  const managed = useMemo(() => groups, [groups]);
 
   useEffect(() => {
     let active = true;
@@ -634,7 +631,7 @@ function ResourcesSection({ groups, refreshKey }) {
       setState((current) => ({ ...current, loading: true, error: "" }));
       try {
         const byGroup = await Promise.all(managed.map(async (group) => {
-          const data = await apiRequest(`workspaces/${group.workspace_id}/resources?limit=50`);
+          const data = await apiRequest(`study-groups/${group.id}/resources?limit=50`);
           return { group, resources: data.resources || [] };
         }));
         if (active) setState({ loading: false, error: "", byGroup });
@@ -653,18 +650,18 @@ function ResourcesSection({ groups, refreshKey }) {
           <button type="button" className="button button-secondary" disabled={state.loading} onClick={() => setNonce((value) => value + 1)}>Refresh</button>
         </div>
         <p className="leader-muted">
-          Resources live in each group&apos;s workspace. You only ever see material from the groups you lead.
+          Resources live in each group. You only ever see material from the groups you lead.
         </p>
         {state.loading && <LeaderDataSkeleton />}
         {state.error && <p className="feature-error">{state.error}</p>}
         {!state.loading && !state.error && managed.length === 0 && (
-          <p className="feature-muted">None of your groups have an active workspace yet.</p>
+          <p className="feature-muted">None of your groups have shared resources yet.</p>
         )}
         {!state.loading && !state.error && state.byGroup.map(({ group, resources }) => (
           <div className="leader-resource-group" key={group.id}>
             <div className="section-heading leader-split">
               <div><h3>{group.name} <span className="heading-count">{resources.length}</span></h3></div>
-              <Link className="button button-secondary" href={`/dashboard/workspaces/${group.workspace_id}?tab=resources`}>Manage in workspace</Link>
+              <Link className="button button-secondary" href={`/dashboard/groups/${group.id}?tab=Resources`}>Manage resources</Link>
             </div>
             {resources.length === 0 ? (
               <p className="feature-muted">No resources added yet.</p>
@@ -1063,15 +1060,15 @@ function SessionsSection({ activeGroup, showToast, refreshKey }) {
 
   async function createSession(event) {
     event.preventDefault();
-    if (!activeGroup?.workspace_id) {
-      setFormError("This group has no active workspace yet.");
+    if (!activeGroup?.id) {
+      setFormError("Select a group before scheduling a session.");
       return;
     }
     setSaving(true);
     setFormError("");
     setFormSuccess("");
     try {
-      await apiRequest(`workspaces/${activeGroup.workspace_id}/sessions`, {
+      await apiRequest(`study-groups/${activeGroup.id}/sessions`, {
         method: "POST",
         body: JSON.stringify({
           title: form.title,
@@ -1097,7 +1094,7 @@ function SessionsSection({ activeGroup, showToast, refreshKey }) {
   async function cancelSession(session) {
     setBusyId(session.id);
     try {
-      await apiRequest(`workspaces/${session.workspace_id}/sessions/${session.id}`, {
+      await apiRequest(`study-groups/${activeGroup.id}/sessions/${session.id}`, {
         method: "PATCH",
         body: JSON.stringify({ status: "CANCELLED" }),
       });
@@ -1408,7 +1405,7 @@ function SettingsSection({ activeGroup, identity, showToast, onRefreshOverview, 
         <section className="panel leader-card leader-danger">
           <div className="section-heading"><div><span className="section-overline">DANGER ZONE</span><h3>Archive this group</h3></div></div>
           <p className="leader-muted">
-            Archiving keeps the history for the audit trail but closes the workspace and cancels pending requests and invitations.
+            Archiving keeps the history for the audit trail and cancels pending requests and invitations.
           </p>
           {archiveStage ? (
             <div className="leader-actions">

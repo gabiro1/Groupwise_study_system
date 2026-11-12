@@ -22,7 +22,7 @@ import { z } from "../lib/schemas.js";
  * The original `admin.routes.js` covers accounts, moderation, courses and the
  * overview dashboard. This router adds the management tools an administrator
  * needs around *groups and their leaders*, the academic delivery surfaces
- * (workspaces, sessions, meetings), analytics/export, platform announcements,
+ * (groups, sessions, meetings), analytics/export, platform announcements,
  * AI configuration and support visibility.
  *
  * Three invariants, matching the rest of the admin area:
@@ -46,8 +46,8 @@ const searchQuery = z.string().trim().max(120).optional();
 // Group leaders
 //
 // A "group leader" is an account that owns or moderates at least one active
-// group. Leadership is a membership permission (OWNER/MODERATOR) plus the
-// GROUP_LEADER account role; this surface keeps the two in step.
+// group. Leadership is a membership permission (OWNER/MODERATOR), not a global
+// account role.
 // ---------------------------------------------------------------------------
 
 const LEADERS_SUBQUERY = `
@@ -71,8 +71,14 @@ router.get(
                  FROM study_group_members m JOIN study_groups g ON g.id = m.group_id
                 WHERE m.student_id = u.id AND m.left_at IS NULL AND m.status = 'ACTIVE'
                   AND m.role IN ('OWNER', 'MODERATOR') AND g.status = 'ACTIVE') AS group_names
-         FROM users u JOIN roles r ON r.id = u.role_id
-        WHERE r.key = 'GROUP_LEADER' AND u.deleted_at IS NULL
+         FROM users u
+        WHERE u.deleted_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM study_group_members lm
+            JOIN study_groups lg ON lg.id = lm.group_id AND lg.status = 'ACTIVE'
+            WHERE lm.student_id = u.id AND lm.left_at IS NULL AND lm.status = 'ACTIVE'
+              AND lm.role IN ('OWNER', 'MODERATOR')
+          )
           AND ($1::text IS NULL
                OR concat(u.first_name, ' ', u.last_name) ILIKE '%' || $1 || '%'
                OR u.email ILIKE '%' || $1 || '%')
@@ -98,7 +104,7 @@ router.get(
     const rows = await queryRows(
       `SELECT u.id, u.email, u.first_name, u.last_name, r.key AS role, u.status
          FROM users u JOIN roles r ON r.id = u.role_id
-        WHERE u.deleted_at IS NULL AND r.key IN ('STUDENT', 'GROUP_LEADER')
+        WHERE u.deleted_at IS NULL AND r.key = 'STUDENT'
           AND (concat(u.first_name, ' ', u.last_name) ILIKE '%' || $1 || '%' OR u.email ILIKE '%' || $1 || '%')
         ORDER BY u.first_name ASC
         LIMIT $2`,
@@ -139,9 +145,8 @@ router.get(
 /**
  * POST /api/admin/groups/:groupId/leaders — assign a leader to a group.
  *
- * The membership row is the source of truth for *which* group; the account role
- * is raised to GROUP_LEADER so leadership is visible everywhere. The two are
- * written in one transaction.
+ * The membership row is the source of truth for both the group and the
+ * leadership permission. Global account roles remain STUDENT/ADMIN only.
  */
 router.post(
   "/groups/:groupId/leaders",
@@ -179,23 +184,6 @@ router.post(
         "admin:assignLeader",
       );
 
-      // Raise a plain student to group leader; never touch an existing admin.
-      const promoted = await tx.query(
-        `UPDATE users SET role_id = (SELECT id FROM roles WHERE key = 'GROUP_LEADER'), updated_at = now()
-          WHERE id = $1
-            AND role_id = (SELECT id FROM roles WHERE key = 'STUDENT')
-          RETURNING id`,
-        [userId],
-        "admin:promoteLeaderRole",
-      );
-      const sessionsRevoked = promoted.rowCount
-        ? await tx.query(
-            "UPDATE auth_sessions SET revoked_at = now(), revoked_reason = 'role_change' WHERE user_id = $1 AND revoked_at IS NULL",
-            [userId],
-            "admin:revokeLeaderPromotionSessions",
-          )
-        : { rowCount: 0 };
-
       await recordAudit(
         {
           actor: req.user,
@@ -207,7 +195,6 @@ router.post(
             userId,
             groupName: group.name,
             membershipRole: membership.role,
-            sessionsRevoked: sessionsRevoked.rowCount ?? 0,
           },
         },
         { tx },
@@ -225,7 +212,7 @@ router.post(
         { tx },
       );
 
-      return { membership, sessionsRevoked: sessionsRevoked.rowCount ?? 0 };
+       return { membership };
     }, "admin:assignLeader");
 
     return ok(res, { ...result, userId, groupId });
@@ -236,8 +223,8 @@ router.post(
  * DELETE /api/admin/groups/:groupId/leaders/:userId — remove a leader.
  *
  * Only moderators can be removed here; the owner must be transferred first so a
- * group is never left ownerless. If the user leads no other group their account
- * role drops back to STUDENT.
+ * group is never left ownerless. Removing the last leadership membership leaves
+ * the account as an ordinary STUDENT.
  */
 router.delete(
   "/groups/:groupId/leaders/:userId",
@@ -276,24 +263,6 @@ router.delete(
         "admin:countLeadingGroups",
       );
 
-      let sessionsRevoked = 0;
-      if (remaining.n === 0) {
-        const demoted = await tx.query(
-          `UPDATE users SET role_id = (SELECT id FROM roles WHERE key = 'STUDENT'), updated_at = now()
-            WHERE id = $1 AND role_id = (SELECT id FROM roles WHERE key = 'GROUP_LEADER')`,
-          [userId],
-          "admin:demoteLeaderRole",
-        );
-        if ((demoted.rowCount ?? 0) > 0) {
-          const sessions = await tx.query(
-            "UPDATE auth_sessions SET revoked_at = now(), revoked_reason = 'role_change' WHERE user_id = $1 AND revoked_at IS NULL",
-            [userId],
-            "admin:revokeLeaderDemotionSessions",
-          );
-          sessionsRevoked = sessions.rowCount ?? 0;
-        }
-      }
-
       await recordAudit(
         {
           actor: req.user,
@@ -301,88 +270,15 @@ router.delete(
           action: AUDIT.GROUP_LEADER_REMOVED,
           entityType: "study_group",
           entityId: groupId,
-          metadata: { userId, remainingGroups: remaining.n, sessionsRevoked },
+          metadata: { userId, remainingGroups: remaining.n },
         },
         { tx },
       );
 
-      return { remainingGroups: remaining.n, sessionsRevoked };
+       return { remainingGroups: remaining.n };
     }, "admin:removeLeader");
 
-    return ok(res, { removed: true, userId, groupId, stillLeading: stillLeading.remainingGroups, sessionsRevoked: stillLeading.sessionsRevoked });
-  }),
-);
-
-// ---------------------------------------------------------------------------
-// Workspaces — read-only oversight (metadata only, never private content).
-// ---------------------------------------------------------------------------
-
-router.get(
-  "/workspaces",
-  searchLimiter,
-  validate({ query: z.object({ q: searchQuery, limit: limitQuery, cursor: cursorQuery }) }),
-  asyncHandler(async (req, res) => {
-    const { q = null, limit, cursor } = req.query;
-
-    const workspaces = await queryRows(
-      `SELECT w.id, w.name, w.description, w.is_archived, w.created_at,
-              g.id AS group_id, g.name AS group_name, g.status AS group_status,
-              c.course_code, c.name AS course_name,
-              (SELECT count(*)::int FROM tasks t WHERE t.workspace_id = w.id) AS task_count,
-              (SELECT count(*)::int FROM resources r WHERE r.workspace_id = w.id AND NOT r.is_deleted) AS resource_count,
-              (SELECT count(*)::int FROM study_sessions s WHERE s.workspace_id = w.id) AS session_count
-         FROM workspaces w
-         LEFT JOIN study_groups g ON g.id = w.group_id
-         LEFT JOIN courses c ON c.id = g.course_id
-        WHERE ($1::text IS NULL OR w.name ILIKE '%' || $1 || '%' OR g.name ILIKE '%' || $1 || '%')
-        ORDER BY w.created_at DESC
-        LIMIT $2 OFFSET $3`,
-      [q, limit, cursor],
-      "admin:listWorkspaces",
-    );
-
-    return ok(res, { workspaces, cursor: workspaces.length === limit ? cursor + limit : null });
-  }),
-);
-
-/** GET /api/admin/workspaces/:workspaceId — aggregate detail, no private content. */
-router.get(
-  "/workspaces/:workspaceId",
-  searchLimiter,
-  validate({ params: z.object({ workspaceId: z.string().uuid() }) }),
-  asyncHandler(async (req, res) => {
-    const workspace = await queryOne(
-      `SELECT w.id, w.name, w.description, w.is_archived, w.created_at, w.archived_at,
-              g.id AS group_id, g.name AS group_name, g.status AS group_status, g.member_count,
-              c.course_code, c.name AS course_name
-         FROM workspaces w
-         LEFT JOIN study_groups g ON g.id = w.group_id
-         LEFT JOIN courses c ON c.id = g.course_id
-        WHERE w.id = $1`,
-      [req.params.workspaceId],
-      "admin:workspaceDetail",
-    );
-    if (!workspace) throw new NotFoundError("That workspace");
-
-    const [counts, recentSessions] = await Promise.all([
-      queryOne(
-        `SELECT
-           (SELECT count(*)::int FROM tasks t WHERE t.workspace_id = $1) AS tasks,
-           (SELECT count(*)::int FROM tasks t WHERE t.workspace_id = $1 AND t.status = 'COMPLETED') AS tasks_done,
-           (SELECT count(*)::int FROM resources r WHERE r.workspace_id = $1 AND NOT r.is_deleted) AS resources,
-           (SELECT count(*)::int FROM study_sessions s WHERE s.workspace_id = $1) AS sessions`,
-        [req.params.workspaceId],
-        "admin:workspaceCounts",
-      ),
-      queryRows(
-        `SELECT id, title, status, starts_at FROM study_sessions
-          WHERE workspace_id = $1 ORDER BY starts_at DESC LIMIT 5`,
-        [req.params.workspaceId],
-        "admin:workspaceSessions",
-      ),
-    ]);
-
-    return ok(res, { workspace, counts, recentSessions });
+    return ok(res, { removed: true, userId, groupId, stillLeading: stillLeading.remainingGroups, sessionsRevoked: 0 });
   }),
 );
 
@@ -406,14 +302,12 @@ router.get(
 
     const sessions = await queryRows(
       `SELECT s.id, s.title, s.status, s.mode, s.starts_at, s.ends_at, s.created_at,
-              w.id AS workspace_id, w.name AS workspace_name,
               g.id AS group_id, g.name AS group_name, c.course_code,
               host.first_name AS host_first_name, host.last_name AS host_last_name,
               (SELECT count(*)::int FROM session_participants p WHERE p.session_id = s.id) AS participants,
               (SELECT count(*)::int FROM session_participants p WHERE p.session_id = s.id AND p.attended) AS attended
          FROM study_sessions s
-         JOIN workspaces w ON w.id = s.workspace_id
-         JOIN study_groups g ON g.id = w.group_id
+         JOIN study_groups g ON g.id = s.group_id
          LEFT JOIN courses c ON c.id = g.course_id
          LEFT JOIN users host ON host.id = s.created_by
         WHERE ($1::text IS NULL OR s.status::text = $1)
@@ -554,13 +448,52 @@ async function collectAnalytics(range) {
     queryOne(
       `SELECT
          (SELECT count(*)::int FROM users u JOIN roles r ON r.id = u.role_id WHERE r.key = 'STUDENT' AND u.deleted_at IS NULL) AS students,
-         (SELECT count(*)::int FROM users u JOIN roles r ON r.id = u.role_id WHERE r.key = 'GROUP_LEADER' AND u.deleted_at IS NULL) AS group_leaders,
+          (SELECT count(DISTINCT m.student_id)::int
+             FROM study_group_members m
+             JOIN study_groups g ON g.id = m.group_id AND g.status = 'ACTIVE'
+            WHERE m.left_at IS NULL AND m.status = 'ACTIVE'
+              AND m.role IN ('OWNER', 'MODERATOR')) AS group_leaders,
          (SELECT count(*)::int FROM users u JOIN roles r ON r.id = u.role_id WHERE r.key = 'ADMIN' AND u.deleted_at IS NULL) AS admins,
          (SELECT count(*)::int FROM users WHERE status = 'ACTIVE' AND deleted_at IS NULL) AS active_accounts,
-         (SELECT count(*)::int FROM study_groups) AS groups,
-         (SELECT count(*)::int FROM study_groups WHERE status = 'ACTIVE') AS active_groups,
-         (SELECT count(*)::int FROM workspaces WHERE NOT is_archived) AS workspaces,
-         (SELECT count(*)::int FROM study_sessions WHERE status <> 'CANCELLED') AS sessions,
+          (SELECT count(*)::int FROM study_groups) AS groups,
+          (SELECT count(*)::int FROM study_groups WHERE status = 'ACTIVE') AS active_groups,
+          (SELECT count(*)::int
+             FROM (
+               SELECT p.id
+                 FROM study_plans p
+                 JOIN study_groups g ON g.id = p.group_id AND g.status = 'ACTIVE'
+               UNION ALL
+               SELECT t.id
+                 FROM tasks t
+                 JOIN study_groups g ON g.id = t.group_id AND g.status = 'ACTIVE'
+               UNION ALL
+               SELECT resource_row.id
+                 FROM resources resource_row
+                 JOIN study_groups resource_group ON resource_group.id = resource_row.group_id
+                   AND resource_group.status = 'ACTIVE'
+                WHERE NOT resource_row.is_deleted
+               UNION ALL
+               SELECT message_row.id
+                 FROM messages message_row
+                 JOIN study_groups message_group ON message_group.id = message_row.group_id
+                   AND message_group.status = 'ACTIVE'
+                WHERE message_row.deleted_at IS NULL
+             ) AS group_content) AS content_items,
+          (SELECT count(*)::int FROM study_plans plan_row
+             JOIN study_groups plan_group ON plan_group.id = plan_row.group_id
+               AND plan_group.status = 'ACTIVE') AS plans,
+          (SELECT count(*)::int FROM tasks task_row
+             JOIN study_groups task_group ON task_group.id = task_row.group_id
+               AND task_group.status = 'ACTIVE') AS tasks,
+          (SELECT count(*)::int FROM resources resource_row
+             JOIN study_groups resource_group ON resource_group.id = resource_row.group_id
+               AND resource_group.status = 'ACTIVE'
+            WHERE NOT resource_row.is_deleted) AS resources,
+          (SELECT count(*)::int FROM messages message_row
+             JOIN study_groups message_group ON message_group.id = message_row.group_id
+               AND message_group.status = 'ACTIVE'
+            WHERE message_row.deleted_at IS NULL) AS messages,
+          (SELECT count(*)::int FROM study_sessions WHERE status <> 'CANCELLED') AS sessions,
          (SELECT count(*)::int FROM group_meetings WHERE status <> 'CANCELLED') AS meetings,
          (SELECT count(*)::int FROM reports WHERE status IN ('OPEN', 'IN_REVIEW')) AS pending_reports`,
       [],
@@ -569,7 +502,7 @@ async function collectAnalytics(range) {
     queryRows(
       `SELECT 'registrations' AS series, to_char(date_trunc('day', u.created_at), 'YYYY-MM-DD') AS day, count(*)::int AS n
          FROM users u JOIN roles r ON r.id = u.role_id
-        WHERE r.key IN ('STUDENT', 'GROUP_LEADER') AND u.deleted_at IS NULL AND u.created_at >= $1
+         WHERE r.key = 'STUDENT' AND u.deleted_at IS NULL AND u.created_at >= $1
         GROUP BY 2
        UNION ALL
        SELECT 'groups', to_char(date_trunc('day', g.created_at), 'YYYY-MM-DD'), count(*)::int
@@ -604,7 +537,11 @@ async function collectAnalytics(range) {
       activeAccounts: totals.active_accounts,
       groups: totals.groups,
       activeGroups: totals.active_groups,
-      workspaces: totals.workspaces,
+      contentItems: totals.content_items,
+      plans: totals.plans,
+      tasks: totals.tasks,
+      resources: totals.resources,
+      messages: totals.messages,
       sessions: totals.sessions,
       meetings: totals.meetings,
       pendingReports: totals.pending_reports,
@@ -653,8 +590,12 @@ router.get(
                 ["Active accounts", data.totals.activeAccounts],
                 ["Study groups", data.totals.groups],
                 ["Active groups", data.totals.activeGroups],
-                ["Workspaces", data.totals.workspaces],
-                ["Sessions", data.totals.sessions],
+                 ["Group content items", data.totals.contentItems],
+                 ["Study plans", data.totals.plans],
+                 ["Tasks", data.totals.tasks],
+                 ["Resources", data.totals.resources],
+                 ["Group messages", data.totals.messages],
+                 ["Sessions", data.totals.sessions],
                 ["Meetings", data.totals.meetings],
                 ["Pending reports", data.totals.pendingReports],
               ],
@@ -730,7 +671,6 @@ const AUDIENCE = z.enum(["ALL", "STUDENTS", "GROUP_LEADERS", "ADMINS"]);
 
 const AUDIENCE_ROLE = {
   STUDENTS: "STUDENT",
-  GROUP_LEADERS: "GROUP_LEADER",
   ADMINS: "ADMIN",
 };
 
@@ -783,7 +723,15 @@ router.post(
 
     const params = [];
     let where = "u.deleted_at IS NULL AND u.status = 'ACTIVE'";
-    if (audience !== "ALL") {
+    if (audience === "GROUP_LEADERS") {
+      where += ` AND EXISTS (
+        SELECT 1
+          FROM study_group_members lm
+          JOIN study_groups lg ON lg.id = lm.group_id AND lg.status = 'ACTIVE'
+         WHERE lm.student_id = u.id AND lm.left_at IS NULL AND lm.status = 'ACTIVE'
+           AND lm.role IN ('OWNER', 'MODERATOR')
+      )`;
+    } else if (audience !== "ALL") {
       params.push(AUDIENCE_ROLE[audience]);
       where += ` AND r.key = $${params.length}`;
     }

@@ -13,7 +13,7 @@ process.env.WRITE_RATE_LIMIT_MAX = "100000";
 process.env.LOG_LEVEL = "silent";
 
 const { createApp } = await import("../src/config/app.js");
-const { pool, query, queryOne, closePool } = await import("../src/config/db.js");
+const { pool, query, queryOne, withTransaction, closePool } = await import("../src/config/db.js");
 const { signAccessToken } = await import("../src/lib/tokens.js");
 const { hashPassword } = await import("../src/lib/crypto.js");
 
@@ -78,16 +78,18 @@ async function createGroup(ownerId, name) {
   const course = await queryOne("SELECT id FROM courses LIMIT 1", [], "t:course");
   assert.ok(course, "courses seed required");
   const id = randomUUID();
-  await query(
-    `INSERT INTO study_groups (id, slug, name, course_id, owner_id, privacy, status)
-     VALUES ($1, $2, $3, $4, $5, 'REQUEST_REQUIRED', 'ACTIVE')`,
-    [id, `meet-${RUN}-${randomUUID().slice(0, 6)}`, name, course.id, ownerId], "t:cg2",
-  );
-  await query(
-    `INSERT INTO study_group_members (group_id, student_id, role, status)
-     VALUES ($1, $2, 'OWNER', 'ACTIVE') ON CONFLICT DO NOTHING`,
-    [id, ownerId], "t:co",
-  );
+  await withTransaction(async (tx) => {
+    await tx.query(
+      `INSERT INTO study_groups (id, slug, name, course_id, owner_id, privacy, status)
+       VALUES ($1, $2, $3, $4, $5, 'REQUEST_REQUIRED', 'ACTIVE')`,
+      [id, `meet-${RUN}-${randomUUID().slice(0, 6)}`, name, course.id, ownerId],
+    );
+    await tx.query(
+      `INSERT INTO study_group_members (group_id, student_id, role, status)
+       VALUES ($1, $2, 'OWNER', 'ACTIVE') ON CONFLICT DO NOTHING`,
+      [id, ownerId],
+    );
+  }, "t:createGroup");
   createdGroupIds.push(id);
   return id;
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { normalizeNotificationLink } from "./notificationLinks";
 
 async function apiRequest(path, options = {}) {
   const response = await fetch(`/api/${path}`, {
@@ -90,7 +91,7 @@ export default function NotificationsInbox({ onUnreadChange }) {
         <div className="notification-list">
           {notifications.map((item) => {
             const content = <div className="notification-details"><strong>{item.title}</strong>{item.body && <span>{item.body}</span>}<small>{new Date(item.created_at).toLocaleString()}</small></div>;
-            const safeLink = typeof item.link === "string" && item.link.startsWith("/dashboard/") ? item.link : "";
+            const safeLink = normalizeNotificationLink(item);
             return (
               <article className={`notification-item ${item.read_at ? "" : "unread"}`} key={item.id}>
                 <span className="notification-indicator" aria-hidden="true" />

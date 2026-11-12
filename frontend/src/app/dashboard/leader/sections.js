@@ -11,7 +11,6 @@ export const NAV_GROUPS = [
       { key: "overview", label: "Dashboard", icon: "home" },
       { label: "Discover Groups", icon: "search", href: "/dashboard/discover" },
       { label: "My Groups", icon: "users", href: "/dashboard/groups" },
-      { label: "Workspaces", icon: "workspace", href: "/dashboard/workspaces" },
     ],
   },
   {
@@ -21,15 +20,6 @@ export const NAV_GROUPS = [
       { key: "members", label: "Members", icon: "users" },
       { key: "sessions", label: "Study Sessions", icon: "calendar", badge: "upcomingSessions" },
       { key: "resources", label: "Group Resources", icon: "folder" },
-    ],
-  },
-  {
-    label: "LEARNING & COMMUNICATION",
-    items: [
-      { label: "Messages", icon: "chat", href: "/dashboard/messages" },
-      { label: "Meetings", icon: "video", href: "/dashboard/meetings" },
-      { label: "Partners", icon: "partner", href: "/dashboard/partners" },
-      { label: "Notifications", icon: "bell", href: "/dashboard/notifications" },
     ],
   },
   {

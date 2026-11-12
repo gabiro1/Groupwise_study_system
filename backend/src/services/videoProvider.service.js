@@ -23,7 +23,7 @@ export const PROVIDERS = Object.freeze(["JITSI", "LIVEKIT", "GOOGLE_MEET", "NONE
 
 /**
  * Google Meet links are user-supplied (TWIGANE cannot create them without a
- * Google Workspace integration), so they are validated strictly before being
+ * Google Meet API integration), so they are validated strictly before being
  * stored or handed to members: https only, meet.google.com host only, and a
  * room-code path only (`abc-defg-hij`). Anything else is rejected rather than
  * passed through, so a meeting can never link members to an arbitrary site.

@@ -1,7 +1,7 @@
-import LecturerDashboard from "./LecturerDashboard";
+import { redirect } from "next/navigation";
 
-export const metadata = { title: "Lecturer · Lien" };
+export const metadata = { title: "Dashboard · Lien" };
 
 export default function LecturerPage() {
-  return <LecturerDashboard />;
+  redirect("/dashboard");
 }

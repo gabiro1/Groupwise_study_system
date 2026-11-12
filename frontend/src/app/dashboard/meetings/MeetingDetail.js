@@ -22,7 +22,7 @@ async function api(path, options = {}) {
   return data.data;
 }
 
-export default function MeetingDetail({ meetingId }) {
+export default function MeetingDetail({ meetingId, groupId = null }) {
   const [detail, setDetail] = useState(null);
   const [attendance, setAttendance] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -33,6 +33,7 @@ export default function MeetingDetail({ meetingId }) {
   const [joinConfig, setJoinConfig] = useState(null);
   const [joined, setJoined] = useState(false);
   const [notice, setNotice] = useState("");
+  const backHref = groupId ? `/dashboard/groups/${groupId}?tab=Meetings` : "/dashboard/meetings";
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -107,7 +108,7 @@ export default function MeetingDetail({ meetingId }) {
         </div>
         <div className="workspace-create-actions">
           <button className="button button-secondary" type="button" onClick={refresh}>Retry</button>
-          <Link className="button button-primary" href="/dashboard/meetings">Back to meetings</Link>
+          <Link className="button button-primary" href={backHref}>Back to meetings</Link>
         </div>
       </section>
     );
@@ -117,7 +118,7 @@ export default function MeetingDetail({ meetingId }) {
   const showJoin = joinable && meeting.status !== "CANCELLED" && meeting.status !== "COMPLETED" && !joinConfig;
   return (
     <section className="section-page" aria-labelledby="meeting-title">
-      <p><Link className="text-link" href="/dashboard/meetings">Back to meetings</Link></p>
+       <p><Link className="text-link" href={backHref}>Back to meetings</Link></p>
       <div className="section-page-heading">
         <span className="section-overline">VIDEO MEETING · {meeting.group_name}</span>
         <h1 id="meeting-title">{meeting.title}</h1>

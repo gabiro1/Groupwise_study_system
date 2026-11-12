@@ -21,7 +21,7 @@ Verified results:
 | Schema cross-check | Passed: 74 tables, 535 SQL statements, 46 enums |
 | Real student usefulness evaluation | Not conducted; authorization and participants were not available in this run |
 
-The application is usable for the validated core workflows, including authentication, profile matching inputs, partner recommendations, group recommendations, recommendation explanations, student/admin access boundaries, and administrator catalogue/matching pages. The final academic acceptance status is **partially complete** because genuine authorized participant UAT remains pending. No participant feedback or usefulness statistics have been fabricated.
+The application is usable for the validated core workflows, including authentication, profile matching inputs, group recommendations, recommendation explanations, student/admin access boundaries, and administrator catalogue/matching pages. The final academic acceptance status is **partially complete** because genuine authorized participant UAT remains pending. No participant feedback or usefulness statistics have been fabricated.
 
 ## 2. Application inventory
 
@@ -40,10 +40,10 @@ The application is usable for the validated core workflows, including authentica
 | Public/authentication | `/`, `/about`, `/how-it-works`, `/faq`, `/contact`, `/login`, `/register`, `/forgot-password`, `/verify-email`, `/reset-password`, `/resend-verification` | Implemented; email delivery is environment-dependent |
 | Student dashboard | `/dashboard`, `/dashboard/[section]` | Implemented |
 | Student profile | `/dashboard/profile` | Implemented |
-| Partner recommendations | `/dashboard/recommendations` | Implemented and browser-tested |
+| Group recommendations | `/dashboard/recommendations` | Implemented and browser-tested |
 | Group recommendations | `/dashboard/recommendations` | Implemented and browser-tested |
 | Group discovery/management | `/dashboard/discover`, `/dashboard/groups`, `/dashboard/workspaces/[workspaceId]`, leader pages | Implemented; only available browser paths were exercised in this run |
-| Partner communication | `/dashboard/partners`, `/dashboard/messages` | Implemented in source; not all mutation states were browser-tested |
+| Group collaboration | `/dashboard/groups`, group detail tabs | Implemented in source; not all mutation states were browser-tested |
 | Sessions and meetings | `/dashboard/sessions`, `/dashboard/meetings`, `/dashboard/meetings/[meetingId]` | Implemented; API lifecycle and permissions covered by backend tests; external media providers remain configuration-dependent |
 | Notifications | `/dashboard/notifications` | Implemented and page navigation browser-tested |
 | Administrator console | `/admin`, `/admin/users`, `/admin/academic`, `/admin/matching`, `/admin/groups`, `/admin/sessions`, `/admin/requests`, `/admin/reports`, `/admin/audit`, `/admin/roles`, `/admin/announcements`, `/admin/settings`, `/admin/system`, `/admin/ai`, `/admin/profile` | Implemented; core admin pages browser-tested |
@@ -129,18 +129,18 @@ The browser suite verifies that a student can:
 
 The profile test also verifies that profile changes are sent through the frontend workflow and are used by the subsequent recommendation request.
 
-## 7. Partner recommendation testing
+## 7. Group recommendation testing
 
-The browser test `student profile, partner recommendations, and backend explanation agreement` passed.
+The browser test `student profile, group recommendations, and backend explanation agreement` passed.
 
-The test captures the actual POST response for `kind: STUDENT`, then compares the first backend result with the rendered card:
+The test captures the actual POST response for `kind: GROUP`, then compares the first backend result with the rendered card:
 
 - Backend result exists and has a score of at least the configured test threshold.
 - Backend explanation contains reasons.
 - Frontend percentage equals the rounded backend score.
 - Frontend displays the backend reason detail.
-- The “Why this partner?” explanation is visible.
-- The partner request action is visible.
+- The “Why this group?” explanation is visible.
+- The group join action is visible.
 
 This directly verifies that the frontend does not independently invent the displayed score or explanation.
 
@@ -163,7 +163,7 @@ Backend tests cover capacity, privacy, archived/inactive groups, membership elig
 
 ## 9. Recommendation usability and understandability
 
-The validated interface uses plain-language explanation labels such as “Why this partner?” and “Why this group?”. The browser comparison confirms score/explanation agreement with the backend.
+The validated interface uses the plain-language explanation label “Why this group?”. The browser comparison confirms score/explanation agreement with the backend.
 
 Usability strengths observed:
 
@@ -207,7 +207,7 @@ External video-provider operation was not claimed as browser-verified because it
 
 ## 12. Communication and notifications
 
-The browser suite verifies navigation to the notifications page and its heading. Backend tests cover notification creation and communication-related authorization, privacy, sessions, partner schemas, direct messages, and meeting/session notifications.
+The browser suite verifies navigation to the notifications page and its heading. Backend tests cover notification creation, group communication authorization, privacy, sessions, and meeting/session notifications.
 
 Unread-count mutation, mark-read interactions, and two-browser message receipt were not claimed as complete browser evidence in this run. They should be included in authorized manual/UAT execution.
 
@@ -310,7 +310,6 @@ Results: backend lint passed; frontend lint passed with six existing warnings an
 - [Playwright configuration](../frontend/playwright.config.js)
 - [Browser HTML report](../frontend/artifacts/phase3/playwright-report/index.html)
 - [Student dashboard screenshot](../frontend/artifacts/phase3/student-dashboard.png)
-- [Partner recommendation screenshot](../frontend/artifacts/phase3/partner-recommendation.png)
 - [Group recommendation screenshot](../frontend/artifacts/phase3/group-recommendation.png)
 - [Administrator academic screenshot](../frontend/artifacts/phase3/admin-academic.png)
 - [UAT plan and questionnaires](phase3-uat-plan.md)

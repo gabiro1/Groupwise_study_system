@@ -8,7 +8,6 @@
 
 export const ROLES = Object.freeze({
   STUDENT: "STUDENT",
-  GROUP_LEADER: "GROUP_LEADER",
   ADMIN: "ADMIN",
 });
 
@@ -100,7 +99,7 @@ export const STUDY_STYLE_LABELS = Object.freeze({
 });
 
 /**
- * Group size compatibility is a *soft* preference: both partners' preferred
+ * Group size compatibility is a *soft* preference: both classmates' preferred
  * ranges are considered so that a group of 2 people who each want 4–6 can
  * still be flagged as a mild mismatch rather than a hard exclusion.
  */
@@ -252,9 +251,6 @@ export const NOTIFICATION_TYPE = Object.freeze({
   AI_RECOMMENDATION: "AI_RECOMMENDATION",
   SYSTEM: "SYSTEM",
   MODERATION: "MODERATION",
-  PARTNER_INVITATION: "PARTNER_INVITATION",
-  PARTNER_ACCEPTED: "PARTNER_ACCEPTED",
-  DIRECT_MESSAGE: "DIRECT_MESSAGE",
   SESSION_STARTED: "SESSION_STARTED",
   ROLE_ASSIGNED: "ROLE_ASSIGNED",
   MEETING_SCHEDULED: "MEETING_SCHEDULED",
@@ -263,25 +259,8 @@ export const NOTIFICATION_TYPE = Object.freeze({
   MEETING_STARTED: "MEETING_STARTED",
 });
 
-/**
- * Study-partner connection lifecycle.
- *
- * A connection is one-directional until accepted: requester -> recipient. The
- * statuses form two timelines — the invite timeline (PENDING -> DECLINED, or ->
- * REVOKED by the requester) and the working timeline (PENDING -> ACCEPTED). A
- * closed connection can be re-offered, because each accepted pair is re-created
- * fresh rather than resurrected from a stale row.
- */
-export const PARTNER_CONNECTION_STATUS = Object.freeze({
-  PENDING: "PENDING",
-  ACCEPTED: "ACCEPTED",
-  DECLINED: "DECLINED",
-  REVOKED: "REVOKED",
-});
-
 export const RECOMMENDATION_KIND = Object.freeze({
   GROUP: "GROUP",
-  STUDENT: "STUDENT",
 });
 
 export const REPORT_STATUS = Object.freeze({

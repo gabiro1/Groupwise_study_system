@@ -38,9 +38,12 @@ export async function loadUser(userId) {
   return queryOne(
     `SELECT u.id, u.email, u.first_name, u.last_name, u.avatar_url, u.status,
             u.email_verified_at, u.role_id, r.key AS role, u.deleted_at,
-            u.locked_until, u.last_login_at, u.created_at
+            u.locked_until, u.last_login_at, u.created_at,
+            sp.student_number, sp.admission_year, sp.current_semester,
+            sp.registration_number_verified_at
        FROM users u
        JOIN roles r ON r.id = u.role_id
+       LEFT JOIN student_profiles sp ON sp.user_id = u.id
       WHERE u.id = $1 AND u.deleted_at IS NULL`,
     [userId],
     "auth:loadUser",
@@ -146,18 +149,34 @@ export function requireRole(...allowedRoles) {
   };
 }
 
-/**
- * A "student" in the product sense: a plain student or a group leader. Leading a
- * group is an additional responsibility layered on a student account, so a group
- * leader keeps every student capability.
- */
-export const requireStudent = requireRole("STUDENT", "GROUP_LEADER");
+/** Global account roles are STUDENT and ADMIN; leadership is membership-scoped. */
+export const requireStudent = requireRole("STUDENT");
 export const requireAdmin = requireRole("ADMIN");
 
-/** Group-leader-only surfaces (leader tools, leader analytics). */
-export const requireGroupLeader = requireRole("GROUP_LEADER");
+/** Require at least one active OWNER/MODERATOR membership. */
+export async function requireGroupLeader(req, _res, next) {
+  try {
+    if (!req.user) throw new AuthenticationError();
 
-/** Staff = administrators. Group leaders are students with extra group duties. */
+    const leadership = await queryOne(
+      `SELECT 1
+         FROM study_group_members m
+         JOIN study_groups g ON g.id = m.group_id AND g.status = 'ACTIVE'
+        WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
+          AND m.role IN ('OWNER', 'MODERATOR')
+        LIMIT 1`,
+      [req.user.id],
+      "auth:groupLeadership",
+    );
+
+    if (!leadership) throw new ForbiddenError("You do not lead an active study group.");
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+}
+
+/** Staff = administrators. */
 export const requireStaff = requireRole("ADMIN");
 
 /**

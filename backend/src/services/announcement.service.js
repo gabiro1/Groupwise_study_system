@@ -19,7 +19,6 @@ import { NOTIFICATION_TYPE } from "../config/constants.js";
 
 const AUDIENCE_ROLE = Object.freeze({
   STUDENTS: "STUDENT",
-  GROUP_LEADERS: "GROUP_LEADER",
   ADMINS: "ADMIN",
 });
 
@@ -32,6 +31,21 @@ const A_COLUMNS = `a.id, a.title, a.body, a.category, a.audience, a.status, a.sc
 
 /** Resolve the recipient ids for an audience. Only live, active accounts. */
 async function resolveAudience(audience) {
+  if (audience === "GROUP_LEADERS") {
+    const rows = await queryRows(
+      `SELECT DISTINCT m.student_id AS id
+         FROM study_group_members m
+         JOIN study_groups g ON g.id = m.group_id AND g.status = 'ACTIVE'
+         JOIN users u ON u.id = m.student_id
+        WHERE m.left_at IS NULL AND m.status = 'ACTIVE'
+          AND m.role IN ('OWNER', 'MODERATOR')
+          AND u.deleted_at IS NULL AND u.status = 'ACTIVE'`,
+      [],
+      "announcements:leaderAudience",
+    );
+    return rows.map((row) => row.id);
+  }
+
   const params = [];
   let where = "u.deleted_at IS NULL AND u.status = 'ACTIVE'";
   if (audience !== "ALL") {

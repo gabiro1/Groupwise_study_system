@@ -189,23 +189,6 @@ router.post(
   }),
 );
 
-/**
- * POST /api/recommendations/pair/:studentId
- *
- * Symmetric compatibility between the caller and one other student. Scoped so a
- * student can only ever request their own pair — not an arbitrary third party's.
- */
-router.get(
-  "/pair/:studentId",
-  requireStudent,
-  searchLimiter,
-  validate({ params: z.object({ studentId: z.string().uuid() }) }),
-  asyncHandler(async (req, res) => {
-    const result = await recommendations.pairCompatibility(req.user.id, req.params.studentId);
-    return ok(res, result);
-  }),
-);
-
 // ---------------------------------------------------------------------------
 // Natural language
 // ---------------------------------------------------------------------------

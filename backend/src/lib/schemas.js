@@ -5,6 +5,7 @@ import {
   LEARNING_GOAL_LABELS,
   GROUP_SIZE,
 } from "../config/constants.js";
+import { normalizeRegistrationNumber, normalizeStaffIdentifier } from "./identifiers.js";
 
 // Re-exported so route modules can build one-off schemas (param refinements,
 // `.partial()` derivations) without importing Zod directly. Every validation
@@ -53,6 +54,23 @@ export const nameField = z
 export const cuid = z.string().trim().min(1).max(80);
 
 export const shortText = z.string().trim().max(500);
+export const semesterLabel = z.string().trim().min(1, "Enter the current semester.").max(40);
+
+/** Broad institution-neutral shape; official validation remains an admin/import concern. */
+export const registrationNumber = z
+  .string()
+  .trim()
+  .min(3, "Enter your university registration number.")
+  .max(80, "That registration number is too long.")
+  .regex(/^[A-Za-z0-9][A-Za-z0-9\s\/_.-]{1,78}[A-Za-z0-9]$/, "Use the official registration number format.")
+  .transform(normalizeRegistrationNumber);
+
+export const staffIdentifier = z
+  .string()
+  .trim()
+  .max(80, "That staff identifier is too long.")
+  .regex(/^[A-Za-z0-9][A-Za-z0-9\s\/_.-]{1,78}[A-Za-z0-9]$/, "Use the official staff identifier format.")
+  .transform(normalizeStaffIdentifier);
 
 export const dayOfWeek = z.coerce.number().int().min(0).max(6);
 export const minuteOfDay = z.coerce.number().int().min(0).max(1440);
@@ -82,9 +100,9 @@ export const optionalBooleanFromQuery = booleanFromQuery.optional();
 /**
  * Who may self-register.
  *
- * Only STUDENT is open. Creating a GROUP_LEADER or ADMIN account through the
- * public signup form would be a privilege-escalation hole, so elevated roles are
- * granted exclusively by an existing admin (see the admin module).
+   * Only STUDENT is open. Creating an ADMIN account through the public signup
+   * form would be a privilege-escalation hole, so elevated access is granted
+   * exclusively by an existing administrator (see the admin module).
  */
 export const publicRole = z.enum([ROLES.STUDENT]);
 
@@ -93,21 +111,33 @@ export const registerSchema = z.object({
   password,
   firstName: nameField,
   lastName: nameField,
-  universityId: uuid.optional().nullable(),
-  programId: uuid.optional().nullable(),
-  yearOfStudy: z.coerce.number().int().min(1).max(12).default(1),
+  registrationNumber,
+  universityId: uuid,
+  facultyId: uuid,
+  departmentId: uuid,
+  programId: uuid,
+  admissionYear: z.coerce.number().int().min(1900).max(2100),
+  currentAcademicYear: z.coerce.number().int().min(1).max(12),
+  currentSemester: semesterLabel,
+  // Kept as an input alias for older clients during the rollout.
+  yearOfStudy: z.coerce.number().int().min(1).max(12).optional(),
   acceptTerms: z.literal(true, { message: "You must accept the terms to continue." }),
-}).refine((data) => !data.programId || data.universityId, {
-  path: ["universityId"],
-  message: "Select a university when providing a programme.",
-});
+}).transform((data) => ({
+  ...data,
+  yearOfStudy: data.currentAcademicYear ?? data.yearOfStudy,
+}));
 
 export const loginSchema = z.object({
-  email,
+  identifier: z.string().trim().min(1, "Enter your registration number.").max(254).optional(),
+  // Backward-compatible API input for older clients. New clients send identifier.
+  email: email.optional(),
   // Deliberately lenient: strength is enforced at registration, not sign-in.
   // Rejecting a weak password here would leak policy and lock out legacy users.
   password: z.string().min(1, "Enter your password.").max(200),
   rememberDevice: z.boolean().optional().default(true),
+}).refine((data) => data.identifier || data.email, {
+  path: ["identifier"],
+  message: "registration number.",
 });
 
 export const forgotPasswordSchema = z.object({ email });
@@ -209,7 +239,7 @@ export const studyPreferencesSchema = z.object({
   maxGroupSize: z.coerce.number().int().min(GROUP_SIZE.MIN).max(GROUP_SIZE.MAX),
   sessionMinutes: z.coerce.number().int().min(30).max(480),
   weeklyGoalHours: z.coerce.number().int().min(0).max(60).optional(),
-  partnerPreferences: shortText.max(500).optional().nullable(),
+  collaborationPreferences: shortText.max(500).optional().nullable(),
 });
 
 export const privacySettingsSchema = z
@@ -217,7 +247,6 @@ export const privacySettingsSchema = z
     profileVisibility: z.enum(["STUDENTS", "COURSES_ONLY", "PRIVATE"]),
     discoverable: z.boolean(),
     allowInvitesFrom: z.enum(["ANY", "SHARED_GROUPS", "NOBODY"]),
-    allowMessagesFrom: z.enum(["ANY", "SHARED_GROUPS", "MEMBERS", "NOBODY"]),
     showAvailability: z.boolean(),
     showSkills: z.boolean(),
     showFullSchedule: z.boolean(),
@@ -249,6 +278,7 @@ export const profileUpdateSchema = z.object({
   universityId: uuid.optional(),
   programId: uuid.optional().nullable(),
   yearOfStudy: z.coerce.number().int().min(1).max(12).optional(),
+  currentSemester: semesterLabel.optional().nullable(),
   timezone: z.string().max(60).optional(),
 });
 
@@ -297,7 +327,6 @@ export const groupSearchSchema = paginationSchema.extend({
 });
 
 export const groupIdParamSchema = z.object({ groupId: uuid });
-export const workspaceIdParamSchema = z.object({ workspaceId: uuid });
 export const idParamSchema = z.object({ id: uuid });
 
 // =============================================================================
@@ -407,14 +436,8 @@ export const recommendMembersQuerySchema = z.object({
 });
 
 // =============================================================================
-// Workspace
+// Group collaboration
 // =============================================================================
-
-export const createWorkspaceSchema = z.object({
-  groupId: uuid,
-  name: z.string().trim().min(3, "Give your workspace a name.").max(100),
-  description: shortText.max(500).optional().default(""),
-});
 
 export const createPlanSchema = z.object({
   title: z.string().trim().min(3).max(120),
@@ -602,7 +625,7 @@ const sessionScheduleFields = {
 
 export const createStudySessionSchema = z
   .object({
-    workspaceId: uuid,
+    groupId: uuid,
     ...sessionScheduleFields,
     title: z.string().trim().min(2, "Give the session a title.").max(140),
     /** Built-in meeting room (LiveKit). Optional — works even when disabled. */
@@ -737,6 +760,7 @@ export const sessionReflectionSchema = z
 
 export const sessionListQuerySchema = z.object({
   scope: z.enum(["all", "upcoming", "active", "past"]).default("all"),
+  groupId: uuid.optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -801,49 +825,6 @@ export const meetingListQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 
-// ---------------------------------------------------------------------------
-// Study partners and direct messaging
-// ---------------------------------------------------------------------------
-
-export const partnerInviteSchema = z.object({
-  recipientId: uuid,
-  /** An optional note accompanying the request. */
-  message: z.string().trim().min(1).max(500).optional(),
-  recommendationId: uuid.optional().nullable(),
-});
-
-export const partnerRespondSchema = z.object({
-  response: z.enum(["ACCEPT", "DECLINE"]),
-});
-
-export const partnerRevokeParamSchema = z.object({
-  invitationId: uuid,
-});
-
-export const partnerRespondParamSchema = z.object({
-  invitationId: uuid,
-});
-
-export const partnerConversationParamSchema = z.object({
-  conversationId: uuid,
-});
-
-export const partnerMessageSchema = z
-  .object({
-    body: z.string().trim().max(4000),
-    /** Client-generated id, so an optimistic bubble can be reconciled. */
-    clientId: z.string().max(64).optional(),
-  })
-  .refine((data) => data.body.length > 0, {
-    message: "Write a message first.",
-    path: ["body"],
-  });
-
-export const partnerMessageQuerySchema = z.object({
-  before: z.string().datetime({ offset: true }).optional(),
-  limit: z.coerce.number().int().min(1).max(50).default(30),
-});
-
 export const topicStatusSchema = z.object({
   topicId: uuid,
   status: z.enum(["NEEDS_HELP", "LEARNING", "COMFORTABLE", "STRONG"]),
@@ -877,7 +858,7 @@ export const quizAttemptSchema = z.object({
 // =============================================================================
 
 export const recommendationRequestSchema = z.object({
-  kind: z.enum(["GROUP", "STUDENT"]).default("GROUP"),
+  kind: z.literal("GROUP").default("GROUP"),
   courseId: uuid.optional().nullable(),
   topicIds: z.array(uuid).max(12).default([]),
   goalId: uuid.optional().nullable(),
@@ -918,7 +899,7 @@ export const recommendationWeightsSchema = z
   );
 
 export const aiChatSchema = z.object({
-  workspaceId: uuid.optional().nullable(),
+  groupId: uuid.optional().nullable(),
   message: z.string().trim().min(1, "Ask a question.").max(2000),
   /** Restrict answers to these resources when the user wants a grounded answer. */
   resourceIds: z.array(uuid).max(10).default([]),
@@ -958,7 +939,7 @@ export const aiConversationListQuerySchema = z.object({
 });
 
 export const aiMessageSchema = z.object({
-  role: z.enum(["USER", "ASSISTANT"]).default("USER"),
+  role: z.literal("USER").default("USER"),
   content: z.string().trim().min(1, "Write a message.").max(8000),
   meta: z.unknown().optional(),
 });
@@ -1046,9 +1027,10 @@ export const academicActivitySchema = z.object({
 // =============================================================================
 
 export const adminUserQuerySchema = z.object({
-  role: z.enum(["STUDENT", "GROUP_LEADER", "ADMIN"]).optional(),
+  role: z.enum(["STUDENT", "ADMIN"]).optional(),
   status: z.enum(["PENDING_VERIFICATION", "ACTIVE", "SUSPENDED", "DEACTIVATED"]).optional(),
   q: shortText.max(120).optional(),
+  registrationNumberStatus: z.enum(["ASSIGNED", "PENDING", "UNVERIFIED"]).optional(),
   universityId: uuid.optional(),
   courseId: uuid.optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
@@ -1057,7 +1039,7 @@ export const adminUserQuerySchema = z.object({
 
 export const changeRoleSchema = z.object({
   userId: uuid,
-  role: z.enum(["STUDENT", "GROUP_LEADER"]),
+  role: z.literal("STUDENT"),
   reason: shortText.max(300).optional().nullable(),
 });
 
@@ -1215,7 +1197,12 @@ export const adminUpdateUserSchema = z
     lastName: z.string().trim().min(1, "Enter a last name.").max(80).optional(),
     email: z.string().trim().toLowerCase().email("Enter a valid email address.").max(254).optional(),
     yearOfStudy: z.coerce.number().int().min(1).max(10).optional().nullable(),
+    admissionYear: z.coerce.number().int().min(1900).max(2100).optional().nullable(),
+    currentSemester: semesterLabel.optional().nullable(),
     programId: uuid.optional().nullable(),
+    registrationNumber: registrationNumber.optional().nullable(),
+    registrationNumberVerified: z.boolean().optional(),
+    staffIdentifier: staffIdentifier.optional().nullable(),
   })
   .refine((value) => Object.values(value).some((entry) => entry !== undefined), {
     message: "Provide at least one field to update.",
@@ -1224,7 +1211,7 @@ export const adminUpdateUserSchema = z
 export const adminDeleteUserSchema = z.object({ reason });
 
 export const adminChangeUserRoleSchema = z.object({
-  role: z.enum(["STUDENT", "GROUP_LEADER", "ADMIN"]),
+  role: z.literal("STUDENT"),
   reason,
 });
 

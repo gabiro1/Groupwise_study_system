@@ -1,6 +1,7 @@
 import { query, queryRows, queryOne, withTransaction } from "../config/db.js";
 import { NotFoundError, AppError } from "../lib/errors.js";
 import { TOPIC_STATUS, STUDY_STYLE_LABELS } from "../config/constants.js";
+import { normalizeRegistrationNumber } from "../lib/identifiers.js";
 
 /**
  * Student profile service.
@@ -107,7 +108,7 @@ export async function getCompleteness(studentId) {
       {
         BASIC: "Helps us show your programme and year to other students.",
         COURSES: "The strongest signal in matching — you can only be matched on courses you take.",
-        SKILLS: "Lets us find partners who are strong where you are not.",
+        SKILLS: "Helps Twigane find groups where classmates can learn from one another.",
         TOPICS: "Topic-level strengths and gaps drive skill complementarity.",
         GOALS: "Groups are matched on whether you are working towards the same thing.",
         AVAILABILITY: "Without this we can only suggest groups, not check your schedules overlap.",
@@ -157,10 +158,15 @@ export async function getProfileBundle(studentId) {
       ),
       queryOne(
         `SELECT sp.*, u.name AS university_name, u.code AS university_code,
-                p.name AS program_name, p.code AS program_code, p.degree_level
+                  f.id AS faculty_id, d.id AS department_id,
+                  f.name AS faculty_name, f.code AS faculty_code,
+                 d.name AS department_name, d.code AS department_code,
+                 p.name AS program_name, p.code AS program_code, p.degree_level
            FROM student_profiles sp
            LEFT JOIN universities u ON u.id = sp.university_id
            LEFT JOIN programs p ON p.id = sp.program_id
+           LEFT JOIN departments d ON d.id = p.department_id
+           LEFT JOIN faculties f ON f.id = d.faculty_id
           WHERE sp.user_id = $1`,
         [studentId],
         "student:bundleProfile",
@@ -211,13 +217,13 @@ export async function getProfileBundle(studentId) {
       ),
       queryOne(
         `SELECT preferred_mode, preferred_style, min_group_size, max_group_size,
-                session_minutes, weekly_goal_hours, preferred_days, partner_preferences
+                session_minutes, weekly_goal_hours, preferred_days, collaboration_preferences
            FROM study_preferences WHERE student_id = $1`,
         [studentId],
         "student:bundlePrefs",
       ),
       queryOne(
-        `SELECT profile_visibility, discoverable, allow_invites_from, allow_messages_from,
+        `SELECT profile_visibility, discoverable, allow_invites_from,
                 show_availability, show_skills, show_full_schedule, share_progress, ai_personalised
            FROM privacy_settings WHERE user_id = $1`,
         [studentId],
@@ -253,14 +259,25 @@ export async function getProfileBundle(studentId) {
       ? {
           universityId: profile.university_id,
           universityName: profile.university_name,
-          universityCode: profile.university_code,
-          programId: profile.program_id,
+           universityCode: profile.university_code,
+           facultyId: profile.faculty_id,
+           facultyName: profile.faculty_name,
+           facultyCode: profile.faculty_code,
+           departmentId: profile.department_id,
+           departmentName: profile.department_name,
+           departmentCode: profile.department_code,
+           programId: profile.program_id,
           programName: profile.program_name,
-          programCode: profile.program_code,
-          degreeLevel: profile.degree_level,
-          yearOfStudy: profile.year_of_study,
-          studentNumber: profile.student_number,
-          bio: profile.bio,
+           programCode: profile.program_code,
+           degreeLevel: profile.degree_level,
+           yearOfStudy: profile.year_of_study,
+           admissionYear: profile.admission_year,
+           currentSemester: profile.current_semester,
+            registrationNumber: profile.student_number ? normalizeRegistrationNumber(profile.student_number) : null,
+            // Keep the old API name during the client rollout.
+            studentNumber: profile.student_number ? normalizeRegistrationNumber(profile.student_number) : null,
+           registrationNumberVerified: Boolean(profile.registration_number_verified_at),
+           bio: profile.bio,
           profilePhotoUrl: profile.profile_photo_url,
           onboardingStep: profile.onboarding_step,
           onboardingDone: profile.onboarding_done,
@@ -318,7 +335,7 @@ export async function getProfileBundle(studentId) {
           sessionMinutes: preferences.session_minutes,
           weeklyGoalHours: preferences.weekly_goal_hours,
           preferredDays: preferences.preferred_days ?? [],
-          partnerPreferences: preferences.partner_preferences,
+          collaborationPreferences: preferences.collaboration_preferences,
         }
       : null,
     privacy: privacy
@@ -326,7 +343,6 @@ export async function getProfileBundle(studentId) {
           profileVisibility: privacy.profile_visibility,
           discoverable: privacy.discoverable,
           allowInvitesFrom: privacy.allow_invites_from,
-          allowMessagesFrom: privacy.allow_messages_from,
           showAvailability: privacy.show_availability,
           showSkills: privacy.show_skills,
           showFullSchedule: privacy.show_full_schedule,
@@ -372,6 +388,7 @@ export async function updateProfile(studentId, updates) {
     universityId: "university_id",
     programId: "program_id",
     yearOfStudy: "year_of_study",
+    currentSemester: "current_semester",
   };
 
   const buildAssignments = (mapping) => {
@@ -760,7 +777,7 @@ function dayName(day) {
 export async function setPreferences(studentId, preferences) {
   await query(
     `INSERT INTO study_preferences
-       (student_id, preferred_mode, preferred_style, min_group_size, max_group_size, session_minutes, weekly_goal_hours, partner_preferences)
+       (student_id, preferred_mode, preferred_style, min_group_size, max_group_size, session_minutes, weekly_goal_hours, collaboration_preferences)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      ON CONFLICT (student_id) DO UPDATE
        SET preferred_mode = EXCLUDED.preferred_mode,
@@ -769,7 +786,7 @@ export async function setPreferences(studentId, preferences) {
            max_group_size = EXCLUDED.max_group_size,
            session_minutes = EXCLUDED.session_minutes,
            weekly_goal_hours = EXCLUDED.weekly_goal_hours,
-           partner_preferences = EXCLUDED.partner_preferences,
+           collaboration_preferences = EXCLUDED.collaboration_preferences,
            updated_at = now()`,
     [
       studentId,
@@ -779,13 +796,13 @@ export async function setPreferences(studentId, preferences) {
       preferences.maxGroupSize,
       preferences.sessionMinutes,
       preferences.weeklyGoalHours ?? 4,
-      preferences.partnerPreferences ?? null,
+      preferences.collaborationPreferences ?? null,
     ],
     "student:setPreferences",
   );
 
   const row = await queryOne(
-    `SELECT preferred_mode, preferred_style, min_group_size, max_group_size, session_minutes, weekly_goal_hours, partner_preferences
+    `SELECT preferred_mode, preferred_style, min_group_size, max_group_size, session_minutes, weekly_goal_hours, collaboration_preferences
        FROM study_preferences WHERE student_id = $1`,
     [studentId],
     "student:readPrefs",
@@ -799,7 +816,7 @@ export async function setPreferences(studentId, preferences) {
     maxGroupSize: row.max_group_size,
     sessionMinutes: row.session_minutes,
     weeklyGoalHours: row.weekly_goal_hours,
-    partnerPreferences: row.partner_preferences,
+    collaborationPreferences: row.collaboration_preferences,
   };
 }
 
@@ -824,7 +841,7 @@ export async function recordOnboardingStep(studentId, step, completed) {
 
 export async function getPrivacy(userId) {
   const row = await queryOne(
-    `SELECT profile_visibility, discoverable, allow_invites_from, allow_messages_from,
+    `SELECT profile_visibility, discoverable, allow_invites_from,
             show_availability, show_skills, show_full_schedule, share_progress, ai_personalised
        FROM privacy_settings WHERE user_id = $1`,
     [userId],
@@ -848,7 +865,6 @@ export async function updatePrivacy(userId, updates) {
     profile_visibility: updates.profileVisibility ?? current.profile_visibility,
     discoverable: updates.discoverable ?? false,
     allow_invites_from: updates.allowInvitesFrom ?? "NOBODY",
-    allow_messages_from: updates.allowMessagesFrom ?? "MEMBERS",
     show_availability: updates.showAvailability ?? false,
     show_skills: updates.showSkills ?? false,
     show_full_schedule: updates.showFullSchedule ?? false,
@@ -862,8 +878,8 @@ export async function updatePrivacy(userId, updates) {
   await query(
     `UPDATE privacy_settings
         SET profile_visibility = $2, discoverable = $3, allow_invites_from = $4,
-            allow_messages_from = $5, show_availability = $6, show_skills = $7,
-            show_full_schedule = $8, share_progress = $9, ai_personalised = $10,
+            show_availability = $5, show_skills = $6,
+            show_full_schedule = $7, share_progress = $8, ai_personalised = $9,
             updated_at = now()
       WHERE user_id = $1`,
     [
@@ -871,7 +887,6 @@ export async function updatePrivacy(userId, updates) {
       next.profile_visibility,
       next.discoverable,
       next.allow_invites_from,
-      next.allow_messages_from,
       next.show_availability,
       next.show_skills,
       next.show_full_schedule,
@@ -893,9 +908,8 @@ export async function updatePrivacy(userId, updates) {
  */
 export async function summaryForStudent(studentId) {
   const { unreadCount: unreadNotifications } = await import("../lib/notifications.js");
-  const { unreadCount: unreadDirectMessages } = await import("./partner.service.js");
 
-  const [rows, notifications, directMessages] = await Promise.all([
+  const [rows, notifications] = await Promise.all([
     queryOne(
       `SELECT
         (SELECT count(*)::int FROM study_group_members m
@@ -905,13 +919,9 @@ export async function summaryForStudent(studentId) {
          WHERE i.invitee_id = $1 AND i.status = 'PENDING' AND i.expires_at > now()) AS pending_group_invitations,
         (SELECT count(*)::int FROM study_group_join_requests jr
          WHERE jr.student_id = $1 AND jr.status = 'PENDING') AS pending_group_requests,
-        (SELECT count(*)::int FROM partner_connections pc
-         WHERE pc.recipient_id = $1 AND pc.status = 'PENDING') AS pending_partner_invitations,
-         (SELECT count(*)::int FROM study_group_members m
-           JOIN study_groups g ON g.id = m.group_id AND g.status = 'ACTIVE'
-           JOIN workspace_groups wg ON wg.group_id = g.id
-           JOIN workspaces w ON w.id = wg.workspace_id AND NOT w.is_archived
-           JOIN study_sessions ss ON ss.workspace_id = w.id
+          (SELECT count(*)::int FROM study_group_members m
+            JOIN study_groups g ON g.id = m.group_id AND g.status = 'ACTIVE'
+            JOIN study_sessions ss ON ss.group_id = g.id
           WHERE m.student_id = $1 AND m.left_at IS NULL AND m.status = 'ACTIVE'
             AND ss.status = 'SCHEDULED' AND ss.starts_at > now()) AS upcoming_sessions,
         (SELECT count(DISTINCT g.id)::int FROM study_group_members m
@@ -922,18 +932,15 @@ export async function summaryForStudent(studentId) {
       "student:summary",
     ),
     unreadNotifications(studentId),
-    unreadDirectMessages(studentId),
   ]);
 
   return {
     activeGroups: rows?.active_groups ?? 0,
     pendingGroupInvitations: rows?.pending_group_invitations ?? 0,
     pendingGroupRequests: rows?.pending_group_requests ?? 0,
-    pendingPartnerInvitations: rows?.pending_partner_invitations ?? 0,
     upcomingSessions: rows?.upcoming_sessions ?? 0,
     leadingGroups: rows?.leading_groups ?? 0,
     unreadNotifications,
-    unreadDirectMessages: directMessages,
   };
 }
 

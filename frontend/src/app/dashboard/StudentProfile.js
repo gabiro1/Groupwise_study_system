@@ -89,6 +89,7 @@ export default function StudentProfile({ initialProfile, onSaved, onNotice }) {
     firstName: initialProfile?.user?.firstName || "",
     lastName: initialProfile?.user?.lastName || "",
     bio: initialProfile?.academic?.bio || "",
+    currentSemester: initialProfile?.academic?.currentSemester || "",
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   }));
   const [preferences, setPreferences] = useState(() => initialProfile?.preferences || {
@@ -98,7 +99,7 @@ export default function StudentProfile({ initialProfile, onSaved, onNotice }) {
     maxGroupSize: 8,
     sessionMinutes: 60,
     weeklyGoalHours: 0,
-    partnerPreferences: "",
+    collaborationPreferences: "",
   });
   const [privacy, setPrivacy] = useState(() => initialProfile?.privacy || {
     discoverable: true,
@@ -282,10 +283,19 @@ export default function StudentProfile({ initialProfile, onSaved, onNotice }) {
                 <div className="feature-form-grid">
                   <label>First name<input required maxLength={80} value={form.firstName || ""} onChange={(event) => setForm({ ...form, firstName: event.target.value })} /></label>
                   <label>Last name<input required maxLength={80} value={form.lastName || ""} onChange={(event) => setForm({ ...form, lastName: event.target.value })} /></label>
+                  <label>Current semester<input maxLength={40} value={form.currentSemester || ""} onChange={(event) => setForm({ ...form, currentSemester: event.target.value })} placeholder="e.g. Semester 1" /></label>
                   <label className="form-span">About you<textarea rows={3} maxLength={500} value={form.bio || ""} onChange={(event) => setForm({ ...form, bio: event.target.value })} placeholder="What are you learning, or what makes a good study session for you?" /></label>
                 </div>
                 <div className="profile-readonly"><span>Email</span><strong>{profile?.user?.email || "—"}</strong></div>
+                <div className="profile-readonly"><span>Registration number</span><strong>{profile?.academic?.registrationNumber || "Pending administrator assignment"}</strong></div>
+                {profile?.academic?.registrationNumber && <div className="profile-readonly"><span>Registration status</span><strong>{profile.academic.registrationNumberVerified ? "Verified" : "Pending verification"}</strong></div>}
                 {profile?.academic?.universityName && <div className="profile-readonly"><span>University</span><strong>{profile.academic.universityName}</strong></div>}
+                {profile?.academic?.facultyName && <div className="profile-readonly"><span>School / Faculty</span><strong>{profile.academic.facultyName}</strong></div>}
+                {profile?.academic?.departmentName && <div className="profile-readonly"><span>Department</span><strong>{profile.academic.departmentName}</strong></div>}
+                {profile?.academic?.programName && <div className="profile-readonly"><span>Programme</span><strong>{profile.academic.programName}</strong></div>}
+                {profile?.academic?.admissionYear && <div className="profile-readonly"><span>Admission year</span><strong>{profile.academic.admissionYear}</strong></div>}
+                {profile?.academic?.yearOfStudy && <div className="profile-readonly"><span>Current academic year</span><strong>Year {profile.academic.yearOfStudy}</strong></div>}
+                {profile?.academic?.currentSemester && <div className="profile-readonly"><span>Current semester</span><strong>{profile.academic.currentSemester}</strong></div>}
                 <button className="button button-primary" type="submit" disabled={busy}>{busy ? "Saving…" : "Save personal details"}</button>
               </form>
             </>
@@ -300,7 +310,7 @@ export default function StudentProfile({ initialProfile, onSaved, onNotice }) {
                 <label>Maximum group size<input type="number" min="2" max="12" value={preferences.maxGroupSize} onChange={(event) => setPreferences({ ...preferences, maxGroupSize: event.target.value })} /></label>
                 <label>Usual session length (minutes)<input type="number" min="30" max="480" step="15" value={preferences.sessionMinutes} onChange={(event) => setPreferences({ ...preferences, sessionMinutes: event.target.value })} /></label>
                 <label>Weekly study goal (hours)<input type="number" min="0" max="60" value={preferences.weeklyGoalHours} onChange={(event) => setPreferences({ ...preferences, weeklyGoalHours: event.target.value })} /></label>
-                <label className="form-span">What I’m looking for in a study partner<textarea rows={3} maxLength={500} value={preferences.partnerPreferences || ""} onChange={(event) => setPreferences({ ...preferences, partnerPreferences: event.target.value })} placeholder="e.g. Someone who can explain statistics, prefers quiet morning sessions, and is focused on exam prep." /></label>
+                <label className="form-span">What helps you learn well in a study group<textarea rows={3} maxLength={500} value={preferences.collaborationPreferences || ""} onChange={(event) => setPreferences({ ...preferences, collaborationPreferences: event.target.value })} placeholder="e.g. Clear explanations, quiet morning sessions, and focused exam preparation." /></label>
               </div>
               <button className="button button-primary" type="submit" disabled={busy}>Save study preferences</button>
             </form>
@@ -320,7 +330,7 @@ export default function StudentProfile({ initialProfile, onSaved, onNotice }) {
           {activeSettingsTab === "privacy" && privacy && (
             <form className="panel feature-form" onSubmit={savePrivacy}>
               <h2>Privacy and discovery</h2>
-              <p className="feature-muted">You control which profile details help other students find compatible study partners.</p>
+              <p className="feature-muted">You control which profile details help Twigane recommend suitable study groups.</p>
               <div className="feature-check-list">
                 {[
                   ["discoverable", "Let other students discover my profile"],

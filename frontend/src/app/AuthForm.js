@@ -108,7 +108,7 @@ export function LoginForm({ nextPath = "/dashboard" }) {
       const result = await request("auth/login", {
         method: "POST",
         body: JSON.stringify({
-          email: form.get("email"),
+          identifier: form.get("identifier"),
           password: form.get("password"),
           rememberDevice: form.get("rememberDevice") === "on",
         }),
@@ -119,14 +119,14 @@ export function LoginForm({ nextPath = "/dashboard" }) {
       // spoofed by editing the form.
       let destination = "/dashboard";
       if (role === "ADMIN") destination = "/admin";
-      else if (role === "GROUP_LEADER") destination = "/dashboard/leader";
       else if (role === "STUDENT" && nextPath.startsWith("/dashboard")) destination = nextPath;
       window.location.assign(new URL(destination, window.location.href));
     } catch (submitError) {
       setError(submitError.message);
       setFields(submitError.fields || {});
       if (submitError.code === "EMAIL_NOT_VERIFIED") {
-        setUnverifiedEmail(String(form.get("email") || ""));
+        const identifier = String(form.get("identifier") || "");
+        setUnverifiedEmail(identifier.includes("@") ? identifier : "");
       }
     } finally {
       setLoading(false);
@@ -142,8 +142,8 @@ export function LoginForm({ nextPath = "/dashboard" }) {
     >
       <form className="auth-form" onSubmit={handleSubmit}>
         {error && <div className="auth-alert" role="alert">{error}{unverifiedEmail && <> <Link href={`/resend-verification?email=${encodeURIComponent(unverifiedEmail)}`}>Resend verification link</Link></>}</div>}
-        <label><span>Email address</span><input name="email" type="email" autoComplete="email" required />{fields.email && <small>{fields.email}</small>}</label>
-        <label><span>Password</span><PasswordField name="password" autoComplete="current-password" required />{fields.password && <small>{fields.password}</small>}</label>
+        <label><span>Registration Number</span><input name="identifier" type="text" autoComplete="username" placeholder=" Registration number" required />{fields.identifier && <small>{fields.identifier}</small>}</label>
+        <label ><span>Password</span><PasswordField name="password" autoComplete="current-password"  required />{fields.password && <small>{fields.password}</small>}</label>
         <div className="auth-form-options"><label className="auth-checkbox"><input name="rememberDevice" type="checkbox" defaultChecked /><span>Keep me signed in</span></label><Link href="/forgot-password">Forgot password?</Link></div>
         <button className="landing-primary-button auth-submit" type="submit" disabled={loading}>{loading ? "Signing in…" : "Sign in"} <span aria-hidden="true">↗</span></button>
       </form>
@@ -155,6 +155,27 @@ export function RegisterForm() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [fields, setFields] = useState({});
+  const [academicTree, setAcademicTree] = useState({ universities: [] });
+  const [academicLoading, setAcademicLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/academic/tree", { cache: "no-store" })
+      .then((response) => response.json().then((result) => ({ response, result })))
+      .then(({ response, result }) => {
+        if (!response.ok) throw new Error(result.error?.message || "We could not load the academic catalogue.");
+        if (active) setAcademicTree(result.data || { universities: [] });
+      })
+      .catch((requestError) => {
+        if (active) setError(requestError.message);
+      })
+      .finally(() => {
+        if (active) setAcademicLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -176,6 +197,14 @@ export function RegisterForm() {
           lastName: form.get("lastName"),
           email: form.get("email"),
           password: form.get("password"),
+          registrationNumber: form.get("registrationNumber"),
+          universityId: form.get("universityId"),
+          facultyId: form.get("facultyId"),
+          departmentId: form.get("departmentId"),
+          programId: form.get("programId"),
+          admissionYear: Number(form.get("admissionYear")),
+          currentAcademicYear: Number(form.get("currentAcademicYear")),
+          currentSemester: form.get("currentSemester"),
           acceptTerms: form.get("acceptTerms") === "on",
         }),
       });
@@ -188,6 +217,9 @@ export function RegisterForm() {
     }
   }
 
+  const universities = academicTree.universities || [];
+  const currentYear = new Date().getFullYear();
+
   return (
     <AuthFrame title="Create your study space." description="Set up your student account to find groups and study with classmates." siteChrome footer={<>Already have an account? <Link href="/login">Sign in</Link></>}>
       <form className="auth-form register-form" onSubmit={handleSubmit}>
@@ -197,12 +229,39 @@ export function RegisterForm() {
           <label><span>Last name</span><input name="lastName" autoComplete="family-name" maxLength={60} required />{fields.lastName && <small>{fields.lastName}</small>}</label>
         </div>
         <label><span>Email address</span><input name="email" type="email" autoComplete="email" maxLength={254} required />{fields.email && <small>{fields.email}</small>}</label>
+        <label><span>University registration number</span><input name="registrationNumber" type="text" autoComplete="off" placeholder="e.g. BBICTR/2024/44711" maxLength={80} required />{fields.registrationNumber && <small>{fields.registrationNumber}</small>}</label>
+        <AcademicRegistrationFields universities={universities} academicLoading={academicLoading} currentYear={currentYear} fields={fields} />
         <label><span>Password</span><PasswordField name="password" autoComplete="new-password" minLength={10} maxLength={200} required /><small>At least 10 characters, with uppercase, lowercase, and a number.</small>{fields.password && <small>{fields.password}</small>}</label>
         <label><span>Confirm password</span><PasswordField name="confirmPassword" autoComplete="new-password" minLength={10} maxLength={200} required />{fields.confirmPassword && <small>{fields.confirmPassword}</small>}</label>
         <label className="auth-checkbox auth-terms"><input type="checkbox" name="acceptTerms" required /><span>I agree to use Lien respectfully and understand I can update my study profile later.</span></label>
         <button className="landing-primary-button auth-submit" type="submit" disabled={loading}>{loading ? "Creating account…" : "Create student account"} <span aria-hidden="true">↗</span></button>
       </form>
     </AuthFrame>
+  );
+}
+
+function AcademicRegistrationFields({ universities, academicLoading, currentYear, fields }) {
+  const [selectedUniversityId, setSelectedUniversityId] = useState("");
+  const [selectedFacultyId, setSelectedFacultyId] = useState("");
+  const [selectedDepartmentId, setSelectedDepartmentId] = useState("");
+  const university = universities.find((item) => item.id === selectedUniversityId);
+  const faculty = university?.faculties?.find((item) => item.id === selectedFacultyId);
+  const department = faculty?.departments?.find((item) => item.id === selectedDepartmentId);
+
+  // The parent form reads these values through native form controls; keeping the
+  // cascading state here avoids inventing a second form-state abstraction.
+  return (
+    <>
+      <label><span>University</span><select name="universityId" value={selectedUniversityId} onChange={(event) => { setSelectedUniversityId(event.target.value); setSelectedFacultyId(""); setSelectedDepartmentId(""); }} disabled={academicLoading} required><option value="">{academicLoading ? "Loading universities…" : "Select your university"}</option>{universities.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{fields.universityId && <small>{fields.universityId}</small>}</label>
+      <label><span>School / Faculty</span><select name="facultyId" value={selectedFacultyId} onChange={(event) => { setSelectedFacultyId(event.target.value); setSelectedDepartmentId(""); }} disabled={!university} required><option value="">Select your faculty</option>{(university?.faculties || []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{fields.facultyId && <small>{fields.facultyId}</small>}</label>
+      <label><span>Department</span><select name="departmentId" value={selectedDepartmentId} onChange={(event) => setSelectedDepartmentId(event.target.value)} disabled={!faculty} required><option value="">Select your department</option>{(faculty?.departments || []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{fields.departmentId && <small>{fields.departmentId}</small>}</label>
+      <label><span>Academic programme</span><select name="programId" defaultValue="" disabled={!department} required><option value="">Select your programme</option>{(department?.programs || []).map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}</select>{fields.programId && <small>{fields.programId}</small>}</label>
+      <div className="auth-name-row">
+        <label><span>Admission year</span><input name="admissionYear" type="number" min="1900" max={currentYear + 1} defaultValue={currentYear} required />{fields.admissionYear && <small>{fields.admissionYear}</small>}</label>
+        <label><span>Current academic year</span><select name="currentAcademicYear" defaultValue="1" required>{Array.from({ length: 5 }, (_, index) => <option key={index + 1} value={index + 1}>Year {index + 1}</option>)}</select>{fields.currentAcademicYear && <small>{fields.currentAcademicYear}</small>}</label>
+      </div>
+      <label><span>Current semester</span><input name="currentSemester" type="text" maxLength={40} placeholder="e.g. Semester 1" required />{fields.currentSemester && <small>{fields.currentSemester}</small>}</label>
+    </>
   );
 }
 
