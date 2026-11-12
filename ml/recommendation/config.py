@@ -46,7 +46,7 @@ def readiness(rows: list[dict], config: TrainingConfig | None = None) -> dict:
         "labelled_candidate_rows": (len(rows), config.min_rows),
         "positive_outcomes": (positives, config.min_positive),
         "negative_outcomes": (negatives, config.min_negative),
-        "groups_or_partner_interactions": (len(interactions), config.min_interactions),
+        "group_interactions": (len(interactions), config.min_interactions),
         "courses_represented": (len(courses), config.min_courses),
         "label_diversity": (len(labels), config.min_labels),
     }

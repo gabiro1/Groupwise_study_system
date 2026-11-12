@@ -15,7 +15,7 @@ SQL = """
 SELECT rr.id AS request_id, rr.student_id, rr.created_at AS request_at,
        rr.serving_model_version, rr.model_version_id, rr.feature_schema_version,
        r.id AS recommendation_id, r.kind AS candidate_type,
-       r.target_student_id, r.target_workspace_id, r.feature_values,
+       r.target_group_id, r.target_workspace_id, r.feature_values,
        COALESCE(r.baseline_score, r.score) AS baseline_score, r.confidence,
        r.shown_at, r.clicked_at, r.accepted_at, r.rejected_at,
        rf.helpful, rf.reason,
@@ -39,7 +39,7 @@ SELECT rr.id AS request_id, rr.student_id, rr.created_at AS request_at,
    LEFT JOIN study_groups target_group ON target_group.id = COALESCE(r.target_group_id, target_workspace.group_id)
   LEFT JOIN courses group_course ON group_course.id = target_group.course_id
   LEFT JOIN courses request_course ON request_course.id = rr.course_id
-  WHERE r.feature_values <> '{}'::jsonb
+  WHERE r.kind = 'GROUP' AND r.feature_values <> '{}'::jsonb
 """
 
 
@@ -114,7 +114,7 @@ def export(database_url: str, output: str, salt: str, *, from_date=None, to_date
                 label = policy.label(row, exported_at)
                 if label is None:
                     continue
-                candidate_id = record.get("target_student_id") or record.get("target_workspace_id")
+                candidate_id = record.get("target_group_id") or record.get("target_workspace_id")
                 timestamp = record.get("request_at")
                 course_id = record.get("course_id")
                 course_level = record.get("course_level")
