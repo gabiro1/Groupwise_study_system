@@ -167,7 +167,7 @@ describe("skillComplementarity — the research contribution", () => {
   const sql = topicId(1);
   const normalization = topicId(2);
 
-  it("ranks a complementary partner above a similar partner", () => {
+  it("ranks a complementary classmate above a similar classmate", () => {
     // Me: weak at both topics.
     const mine = new Map([[sql, NEEDS_HELP], [normalization, LEARNING]]);
 
@@ -235,7 +235,7 @@ describe("skillComplementarity — the research contribution", () => {
     assert.deepEqual(forward.complementary.slice().sort(), backward.complementary.slice().sort());
   });
 
-  it("prefers a partner who covers more of my gaps", () => {
+  it("prefers a classmate who covers more of my gaps", () => {
     const mine = new Map([[sql, NEEDS_HELP], [normalization, NEEDS_HELP]]);
 
     const coversOne = new Map([[sql, STRONG]]);
@@ -392,7 +392,7 @@ describe("preferenceTextSimilarity", () => {
   it("scores unrelated notes below related ones", () => {
     const related = preferenceTextSimilarity(
       "Someone calm who likes quiet mornings",
-      "Quiet mornings and a calm partner",
+      "Quiet mornings and a calm collaboration",
     );
     const unrelated = preferenceTextSimilarity(
       "Someone calm who likes quiet mornings",
